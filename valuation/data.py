@@ -41,6 +41,13 @@ def fetch_fundamentals(ticker: str) -> dict | None:
     for ocf, cx in zip(operating_cf, capex):
         fcf_history.append(ocf + cx)  # capex is reported negative by yfinance
 
+    financials = t.financials
+    if financials is None or financials.empty:
+        revenue_history, net_income_history = [], []
+    else:
+        revenue_history = _first(financials, ["Total Revenue"])
+        net_income_history = _first(financials, ["Net Income"])
+
     total_debt = info.get("totalDebt") or 0
     total_cash = info.get("totalCash") or 0
 
@@ -61,4 +68,9 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         "ebitda": info.get("ebitda"),
         "ev_to_ebitda": info.get("enterpriseToEbitda"),
         "fcf_history": fcf_history,  # most recent year first
+        "revenue_history": revenue_history,  # most recent year first
+        "net_income_history": net_income_history,  # most recent year first
+        "debt_to_equity": info.get("debtToEquity"),
+        "target_mean_price": info.get("targetMeanPrice"),
+        "number_of_analyst_opinions": info.get("numberOfAnalystOpinions"),
     }

@@ -48,6 +48,33 @@ streamlit run app.py
 You can also trigger a refresh manually any time from the repo's **Actions**
 tab ("Update valuations" → "Run workflow").
 
+## "High-confidence picks" (`results/top_picks.csv`)
+
+The full screen ranks 500 stocks by margin of safety, which is noisy on its
+own - a huge gap between price and fair value is just as likely to mean the
+model's assumptions are off as it is to mean the stock is a bargain. The
+picks tier (`valuation/quality.py`, wired into `run.py`) narrows that down to
+stocks where every applicable signal agrees:
+
+- Every valuation method that could be computed (DCF, relative) says the
+  stock is underpriced - not just the blended average.
+- Revenue isn't declining, the company is profitable, free cash flow is
+  positive, debt is at a sane level, and (with enough analyst coverage) Wall
+  Street's own independent consensus target price also sees upside.
+- At least 3 of those quality checks had enough data to actually run.
+- The stock has a known sector, so the relative-valuation cross-check had a
+  real peer group to compare against.
+
+The margin of safety only breaks ties among survivors - a 2% edge that
+clears every check is treated as more meaningful than a 70% edge from a
+single noisy model. An empty `top_picks.csv` on a given day is a normal,
+correct outcome of a strict filter, not a bug.
+
+This still isn't a buy signal. A recent spinoff, divestiture, or accounting
+one-off can distort a company's trailing financials enough to fool every
+check above at once (e.g. FIS's Worldpay divestiture skews its FCF and
+earnings history) - always read why a pick is cheap before acting on it.
+
 ## Methodology and limitations
 
 - Growth and discount-rate assumptions are simplified (flat equity risk

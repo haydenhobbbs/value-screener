@@ -1,6 +1,6 @@
 ticker,sector,price,dcf_value,relative_value,fair_value,margin_of_safety,undervalued,valuation_signals_agree,revenue_not_declining,profitable,fcf_positive,debt_reasonable,analyst_consensus_agrees,quality_checks_passed,quality_checks_applicable,high_confidence_pick,market_cap,last_updated
-APTV,Consumer Cyclical,43.62,240.69,111.03,188.83,0.769,True,True,True,True,True,True,True,5,5,True,9056965632,2026-09-17T23:43:34.979374+00:00
-FIS,Technology,36.43,,156.76,156.76,0.7676,True,True,True,True,True,True,True,5,5,True,18787166208,2026-09-17T23:43:34.979374+00:00
-CMCSA,Communication Services,22.91,,82.06,82.06,0.7208,True,True,True,True,True,True,True,5,5,True,81299267584,2026-09-17T23:43:34.979374+00:00
-NWS,Communication Services,33.37,159.0,57.3,118.32,0.718,True,True,True,True,True,True,,4,4,True,17893437440,2026-09-17T23:43:34.979374+00:00
-UHS,Healthcare,180.75,530.83,649.85,578.44,0.6875,True,True,True,True,True,True,True,5,5,True,10652775424,2026-09-17T23:43:34.979374+00:00
+FIS,Technology,35.62,,157.35,157.35,0.7736,True,True,True,True,True,True,True,5,5,True,18369443840,2026-09-18T23:35:39.245399+00:00
+APTV,Consumer Cyclical,43.59,240.75,109.82,188.38,0.7686,True,True,True,True,True,True,True,5,5,True,9050736640,2026-09-18T23:35:39.245399+00:00
+NWS,Communication Services,32.68,159.41,57.2,118.53,0.7243,True,True,True,True,True,True,,4,4,True,17520887808,2026-09-18T23:35:39.245399+00:00
+CMCSA,Communication Services,22.74,,81.77,81.77,0.7219,True,True,True,True,True,True,True,5,5,True,80696000512,2026-09-18T23:35:39.245399+00:00
+UHS,Healthcare,176.69,534.52,647.67,579.78,0.6952,True,True,True,True,True,True,True,5,5,True,10413493248,2026-09-18T23:35:39.245399+00:00

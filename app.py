@@ -53,6 +53,12 @@ if picks.empty:
         "not that the screener is broken."
     )
 else:
+    st.caption(
+        f"{len(picks)} stocks clear every check today. In a broad market pullback "
+        "the quality checks alone don't discriminate much among S&P 500 blue chips, "
+        "so this list can run long - it's not a curated shortlist, it's everything "
+        "that passes."
+    )
     st.dataframe(
         picks[[
             "ticker", "sector", "price", "fair_value", "margin_of_safety",

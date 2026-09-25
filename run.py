@@ -26,15 +26,18 @@ UNDERVALUED_THRESHOLD = 0.20  # flag stocks priced >=20% below fair value
 MIN_MARKET_CAP = 2_000_000_000  # skip illiquid micro/small caps
 REQUEST_PAUSE_SECONDS = 0.15
 
-# "Top picks" tier: every available valuation method must agree the stock is
-# underpriced, every quality check that had data must pass (no revenue
-# decline, profitable, FCF positive, sane debt, analysts independently see
-# upside), and there must be enough data for that agreement to mean
-# something. Margin of safety just breaks ties among survivors - a stock
-# that clears every check is the point, not the exact percentage.
+# "High-confidence pick" tier: every available valuation method must agree
+# the stock is underpriced, every quality check that had data must pass (no
+# revenue decline, profitable, FCF positive, sane debt, analysts
+# independently see upside), and there must be enough data for that
+# agreement to mean something. Every stock clearing all of that ships to
+# results/top_picks.csv - uncapped, since the point is "everything that
+# passes," not a fixed-size shortlist. In a broad market pullback that can
+# still be 100+ names (quality checks alone don't discriminate much among
+# S&P 500 blue chips) - margin of safety just orders the list, it doesn't
+# trim it.
 MIN_EDGE = 0.01
 MIN_APPLICABLE_QUALITY_CHECKS = 3
-TOP_N_PICKS = 5
 
 # Operating cash flow for these sectors is dominated by float, trading
 # positions, deposits, and reserve movements rather than owner earnings, so
@@ -133,16 +136,12 @@ def main():
     history_path = f"results/history/{datetime.now(timezone.utc):%Y-%m-%d}.csv"
     df.to_csv(history_path, index=False)
 
-    top_picks = (
-        df[df["high_confidence_pick"]]
-        .sort_values("margin_of_safety", ascending=False)
-        .head(TOP_N_PICKS)
-    )
+    top_picks = df[df["high_confidence_pick"]].sort_values("margin_of_safety", ascending=False)
     top_picks.to_csv("results/top_picks.csv", index=False)
 
     print(f"Wrote {len(df)} scored tickers to results/latest.csv")
     print(f"Wrote {len(top_picks)} high-confidence picks to results/top_picks.csv")
-    print(top_picks[["ticker", "sector", "price", "fair_value", "margin_of_safety"]].to_string(index=False))
+    print(top_picks[["ticker", "sector", "price", "fair_value", "margin_of_safety"]].head(20).to_string(index=False))
 
 
 if __name__ == "__main__":

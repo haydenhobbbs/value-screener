@@ -69,10 +69,13 @@ stocks where every applicable signal agrees:
 - The stock has a known sector, so the relative-valuation cross-check had a
   real peer group to compare against.
 
-The margin of safety only breaks ties among survivors - a 2% edge that
-clears every check is treated as more meaningful than a 70% edge from a
-single noisy model. An empty `top_picks.csv` on a given day is a normal,
-correct outcome of a strict filter, not a bug.
+`top_picks.csv` is uncapped - every stock that clears every check ships, sorted
+by margin of safety, which only breaks ties rather than deciding who's on the
+list. In practice this quality bar alone doesn't discriminate much among
+S&P 500 blue chips (most of them are profitable with sane debt), so in a
+broad market pullback the list can run to 100+ names rather than a tidy
+handful. An empty `top_picks.csv` on a given day is a normal, correct outcome
+of a strict filter, not a bug.
 
 This still isn't a buy signal. A recent spinoff, divestiture, or accounting
 one-off can distort a company's trailing financials enough to fool every

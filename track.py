@@ -1,6 +1,7 @@
 """Builds a track record for every high-confidence pick the screener has
-ever made: the price when it was first flagged, the price now, the return
-since, and whether it's still flagged today.
+ever made - every stock that ever cleared the full quality gate, not a
+curated shortlist: the price when it was first flagged, the price now, the
+return since, and whether it's still flagged today.
 
 Consecutive days a ticker stays flagged count as one "episode" (entry = the
 first day it appeared), not a new pick every day it happens to still qualify
@@ -17,8 +18,6 @@ import glob
 import os
 
 import pandas as pd
-
-from run import TOP_N_PICKS
 
 HISTORY_GLOB = "results/history/*.csv"
 LATEST_PATH = "results/latest.csv"
@@ -54,15 +53,10 @@ def group_consecutive(indices: list[int]) -> list[list[int]]:
 
 
 def top_picks_for(df: pd.DataFrame) -> set[str]:
-    """Reconstructs the actual top-N pick list for a day's snapshot - the
-    same selection run.py applies when it writes results/top_picks.csv -
-    rather than every ticker that merely passed the quality gate. That gate
-    alone passes ~25% of the S&P 500 in a broad pullback; the dashboard only
-    ever shows the top N, so that's what a track record should measure.
+    """Every ticker that cleared the high-confidence gate that day - the
+    same set run.py writes (uncapped) to results/top_picks.csv.
     """
-    qualifying = df.loc[df["high_confidence_pick"] == True]  # noqa: E712
-    top = qualifying.sort_values("margin_of_safety", ascending=False).head(TOP_N_PICKS)
-    return set(top["ticker"])
+    return set(df.loc[df["high_confidence_pick"] == True, "ticker"])  # noqa: E712
 
 
 def build_track_record(history: dict[str, pd.DataFrame], latest: pd.DataFrame) -> pd.DataFrame:

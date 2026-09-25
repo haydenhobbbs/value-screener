@@ -11,6 +11,9 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
+    # ~2,600 tickers at roughly 1s/ticker is well under this, but caps a
+    # hang (e.g. Yahoo rate-limiting mid-run) instead of burning hours.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 

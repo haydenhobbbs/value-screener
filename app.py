@@ -32,13 +32,16 @@ st.caption(f"Last updated: {last_updated}")
 
 st.header("High-confidence picks")
 st.caption(
-    "Every available valuation method (DCF, sector-relative multiples) agrees the "
-    "stock is underpriced, AND it passes every applicable quality check: revenue "
-    "not declining, profitable, free-cash-flow positive, debt at a sane level, and "
-    "Wall Street's own analyst consensus independently sees upside too. The size of "
-    "the margin of safety is secondary here - agreement across independent signals "
-    "is the point, not the exact percentage. Still not investment advice: read the "
-    "why-it's-cheap story yourself before acting on any of these."
+    "Requires both a DCF and a sector-relative-multiple estimate, and both must agree "
+    "the stock is underpriced - excludes Financial Services/Real Estate (no reliable "
+    "DCF) and any stock whose DCF failed sanity checks, since the track record showed "
+    "DCF-less picks perform measurably worse (14% win rate vs 30%). It also has to pass "
+    "every applicable quality check: revenue not declining, profitable, free-cash-flow "
+    "positive, debt at a sane level, and Wall Street's own analyst consensus "
+    "independently sees upside too. The size of the margin of safety is secondary here "
+    "- agreement across independent signals is the point, not the exact percentage. "
+    "Still not investment advice: read the why-it's-cheap story yourself before acting "
+    "on any of these."
 )
 
 try:
@@ -55,7 +58,7 @@ if picks.empty:
 else:
     st.caption(
         f"{len(picks)} stocks clear every check today. In a broad market pullback "
-        "the quality checks alone don't discriminate much among S&P 500 blue chips, "
+        "the quality checks alone don't discriminate much among Russell 3000 blue chips, "
         "so this list can run long - it's not a curated shortlist, it's everything "
         "that passes. Ranked by valuation_gap_pct (how closely the DCF and relative "
         "multiple agree with each other) - the tracker found that mattered a lot "
@@ -101,7 +104,7 @@ else:
 
 st.divider()
 st.header("Full screen")
-st.caption("Every S&P 500 stock scored, for browsing/research beyond the strict picks above.")
+st.caption("Every Russell 3000 stock scored, for browsing/research beyond the strict picks above.")
 
 sectors = sorted(df["sector"].dropna().unique().tolist())
 col1, col2, col3 = st.columns(3)

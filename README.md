@@ -1,7 +1,8 @@
 # Value Screener
 
-Screens the S&P 500 for stocks where the current market price sits well below
-an estimated fair value, as a starting point for value-investing research.
+Screens the Russell 3000 (~2,600 US stocks) for stocks where the current
+market price sits well below an estimated fair value, as a starting point
+for value-investing research.
 
 **This is not investment advice.** It's a rough fundamentals model with a lot
 of simplifying assumptions (see "Methodology and limitations" below) — treat
@@ -9,7 +10,7 @@ flagged stocks as candidates for further research, not buy signals.
 
 ## How it works
 
-1. `run.py` pulls fundamentals for every S&P 500 ticker via `yfinance`.
+1. `run.py` pulls fundamentals for every Russell 3000 ticker via `yfinance`.
 2. For each stock it computes two independent fair-value estimates:
    - **DCF** (`valuation/dcf.py`): projects free cash flow at a capped
      historical growth rate, discounts at a CAPM-based WACC, adds a
@@ -60,8 +61,13 @@ model's assumptions are off as it is to mean the stock is a bargain. The
 picks tier (`valuation/quality.py`, wired into `run.py`) narrows that down to
 stocks where every applicable signal agrees:
 
-- Every valuation method that could be computed (DCF, relative) says the
-  stock is underpriced - not just the blended average.
+- **A DCF value exists and, together with the relative-value estimate, both
+  say the stock is underpriced** - not just the blended average. This rules
+  out Financial Services and Real Estate (DCF-excluded by design, see
+  above) and any stock whose DCF failed its own sanity checks. The track
+  record showed this matters: no-DCF picks ran 14% win rate / -2.74% avg
+  return vs 30% / -1.91% for picks with a DCF - a lone relative-value
+  estimate has nothing to cross-check it against.
 - Revenue isn't declining, the company is profitable, free cash flow is
   positive, debt is at a sane level, and (with enough analyst coverage) Wall
   Street's own independent consensus target price also sees upside.
@@ -70,7 +76,7 @@ stocks where every applicable signal agrees:
   real peer group to compare against.
 
 `top_picks.csv` is uncapped - every stock that clears every check ships. In
-practice this quality bar alone doesn't discriminate much among S&P 500 blue
+practice this quality bar alone doesn't discriminate much among Russell 3000 blue
 chips (most of them are profitable with sane debt), so in a broad market
 pullback the list can run to 100+ names rather than a tidy handful. An empty
 `top_picks.csv` on a given day is a normal, correct outcome of a strict
@@ -115,5 +121,5 @@ earnings history) - always read why a pick is cheap before acting on it.
 - No quality/safety filters yet (e.g. excluding balance-sheet red flags,
   earnings quality, one-off items) — a stock can look statistically
   "undervalued" and still be a value trap. Read the filings before acting.
-- Universe is limited to the S&P 500 and to companies with market cap above
+- Universe is the Russell 3000 (effectively all investable US equities) - see valuation/universe.py for the fallback chain - limited to companies with market cap above
   $2B, to avoid illiquid names skewing the sector-median comparisons.

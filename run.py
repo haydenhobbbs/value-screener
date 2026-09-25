@@ -18,13 +18,30 @@ from valuation.data import fetch_fundamentals
 from valuation.dcf import dcf_value_per_share
 from valuation.quality import run_quality_checks
 from valuation.relative import relative_value_per_share, sector_median_multiples
-from valuation.universe import get_sp500_tickers
+from valuation.universe import get_universe_tickers
 
 DCF_WEIGHT = 0.6
 RELATIVE_WEIGHT = 0.4
 UNDERVALUED_THRESHOLD = 0.20  # flag stocks priced >=20% below fair value
 MIN_MARKET_CAP = 2_000_000_000  # skip illiquid micro/small caps
-REQUEST_PAUSE_SECONDS = 0.15
+REQUEST_PAUSE_SECONDS = 0.5
+
+# yfinance hits Yahoo's undocumented API directly and gets rate-limited hard
+# past a few hundred requests in a short window - each ticker costs 3
+# requests (info/cashflow/financials), so the full Russell 3000 is ~7,800
+# requests per run. On a rate-limit error, back off and retry a few times
+# before giving up on that ticker; if it keeps happening across many
+# consecutive tickers, the whole run is blocked, not just unlucky - abort
+# rather than burn through thousands of guaranteed-to-fail requests.
+# Worst case before giving up on the whole run: threshold * sum(delays) =
+# 8 * (15+45) = ~8 minutes of wasted retrying, not tens of minutes.
+RATE_LIMIT_RETRY_DELAYS = [15, 45]
+CONSECUTIVE_RATE_LIMIT_ABORT_THRESHOLD = 8
+# If fewer than this fraction of the universe was actually fetched, the run
+# was degraded (rate-limited, network issue, etc.) - refuse to write results
+# rather than silently overwrite a good day's data with a tiny, misleading
+# partial scan.
+MIN_FETCH_FRACTION = 0.7
 
 # "High-confidence pick" tier: every available valuation method must agree
 # the stock is underpriced, every quality check that had data must pass (no
@@ -34,7 +51,7 @@ REQUEST_PAUSE_SECONDS = 0.15
 # results/top_picks.csv - uncapped, since the point is "everything that
 # passes," not a fixed-size shortlist. In a broad market pullback that can
 # still be 100+ names (quality checks alone don't discriminate much among
-# S&P 500 blue chips) - margin of safety just orders the list, it doesn't
+# Russell 3000 blue chips) - margin of safety just orders the list, it doesn't
 # trim it.
 MIN_EDGE = 0.01
 MIN_APPLICABLE_QUALITY_CHECKS = 3
@@ -43,22 +60,71 @@ MIN_APPLICABLE_QUALITY_CHECKS = 3
 # positions, deposits, and reserve movements rather than owner earnings, so
 # an FCF-based DCF produces meaningless numbers (banks/insurers routinely
 # came out at 5-10x their actual price in testing). Rely on relative
-# valuation only for these.
+# valuation only for these - which also means stocks in these sectors can
+# never become a high-confidence pick, since that tier now requires a DCF.
 DCF_EXCLUDED_SECTORS = {"Financial Services", "Real Estate"}
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    return "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower()
+
+
+class SustainedRateLimitError(RuntimeError):
+    """Raised when Yahoo keeps rate-limiting us across many consecutive
+    tickers - a sign the whole run is blocked, not that a few requests were
+    unlucky. Callers should stop fetching and work with whatever was already
+    collected rather than burn through the rest of the universe.
+    """
+
+
+def _fetch_with_retry(ticker: str, position: str) -> dict | None:
+    """Tries fetch_fundamentals, retrying on rate-limit errors with backoff.
+    Returns None (and logs) for a non-rate-limit failure. Re-raises if every
+    retry is still rate-limited, so the caller can track consecutive misses.
+    """
+    delays = [0] + RATE_LIMIT_RETRY_DELAYS
+    for attempt, delay in enumerate(delays):
+        if delay:
+            print(f"{position} {ticker}: rate limited, retrying in {delay}s "
+                  f"(attempt {attempt+1}/{len(delays)})", file=sys.stderr)
+            time.sleep(delay)
+        try:
+            return fetch_fundamentals(ticker)
+        except Exception as exc:
+            if not _is_rate_limit_error(exc):
+                print(f"{position} {ticker}: skipped ({exc})", file=sys.stderr)
+                return None
+            if attempt == len(delays) - 1:
+                raise
+    return None  # unreachable, satisfies type checkers
 
 
 def build_dataset(tickers: list[str]) -> list[dict]:
     rows = []
+    consecutive_rate_limits = 0
+
     for i, ticker in enumerate(tickers):
+        position = f"[{i+1}/{len(tickers)}]"
         try:
-            fundamentals = fetch_fundamentals(ticker)
-        except Exception as exc:
-            print(f"[{i+1}/{len(tickers)}] {ticker}: skipped ({exc})", file=sys.stderr)
+            fundamentals = _fetch_with_retry(ticker, position)
+        except Exception:
+            consecutive_rate_limits += 1
+            print(f"{position} {ticker}: still rate limited after retries "
+                  f"({consecutive_rate_limits} in a row)", file=sys.stderr)
+            if consecutive_rate_limits >= CONSECUTIVE_RATE_LIMIT_ABORT_THRESHOLD:
+                raise SustainedRateLimitError(
+                    f"{consecutive_rate_limits} consecutive tickers rate-limited even "
+                    f"after retries - Yahoo has blocked this run. Stopping with "
+                    f"{len(rows)}/{i+1} tickers fetched so far."
+                )
             continue
+
+        consecutive_rate_limits = 0
         if fundamentals is None:
             continue
         rows.append(fundamentals)
         time.sleep(REQUEST_PAUSE_SECONDS)
+
     return rows
 
 
@@ -107,6 +173,12 @@ def score(rows: list[dict]) -> pd.DataFrame:
             and quality["passes_all_applicable"]
             and pd.notna(f.get("sector"))  # missing sector means the relative-value
             # cross-check had no peer group to compare against - not a real signal
+            and dcf_value is not None  # relative-valuation-only picks (mostly
+            # Financial Services/Real Estate, DCF-excluded by design, plus any
+            # stock whose DCF failed its own sanity checks) measurably
+            # underperformed in the track record: 14% win rate / -2.74% avg
+            # return vs 30% / -1.91% for picks that had a DCF. A lone
+            # relative-value estimate has nothing to cross-check it against.
         )
 
         out.append({
@@ -136,10 +208,25 @@ def score(rows: list[dict]) -> pd.DataFrame:
 
 
 def main():
-    tickers = get_sp500_tickers()
+    tickers = get_universe_tickers()
     print(f"Screening {len(tickers)} tickers...")
-    rows = build_dataset(tickers)
+
+    try:
+        rows = build_dataset(tickers)
+    except SustainedRateLimitError as exc:
+        # Don't write anything - a tiny partial scan overwriting a good
+        # day's results would be worse than just skipping today's update.
+        sys.exit(f"Aborting without writing results: {exc}")
+
     print(f"Fetched fundamentals for {len(rows)} tickers.")
+
+    fetch_fraction = len(rows) / len(tickers)
+    if fetch_fraction < MIN_FETCH_FRACTION:
+        sys.exit(
+            f"Aborting without writing results: only fetched {len(rows)}/{len(tickers)} "
+            f"tickers ({fetch_fraction:.0%}, below the {MIN_FETCH_FRACTION:.0%} floor) - "
+            f"this run was degraded, not a real screen."
+        )
 
     df = score(rows)
     df["last_updated"] = datetime.now(timezone.utc).isoformat()

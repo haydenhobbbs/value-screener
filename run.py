@@ -88,6 +88,17 @@ def score(rows: list[dict]) -> pd.DataFrame:
         valuation_signals = [v for v in (dcf_value, relative_value) if v is not None]
         signals_agree_undervalued = bool(valuation_signals) and all(v > price for v in valuation_signals)
 
+        # How much the two independent valuation methods disagree with each
+        # other - not with the price. Two methods built on completely
+        # different assumptions landing near the same number is a stronger
+        # signal than either one alone; a wide gap usually means the DCF (the
+        # more assumption-sensitive of the two) went noisy, not that the
+        # stock is a rare bargain. NaN when only one method was available.
+        if dcf_value and relative_value:
+            valuation_gap_pct = abs(dcf_value - relative_value) / ((dcf_value + relative_value) / 2) * 100
+        else:
+            valuation_gap_pct = None
+
         quality = run_quality_checks(f)
         high_confidence = (
             signals_agree_undervalued
@@ -108,6 +119,7 @@ def score(rows: list[dict]) -> pd.DataFrame:
             "margin_of_safety": round(margin_of_safety, 4),
             "undervalued": margin_of_safety >= UNDERVALUED_THRESHOLD,
             "valuation_signals_agree": signals_agree_undervalued,
+            "valuation_gap_pct": round(valuation_gap_pct, 2) if valuation_gap_pct is not None else None,
             "revenue_not_declining": quality["revenue_not_declining"],
             "profitable": quality["profitable"],
             "fcf_positive": quality["fcf_positive"],
@@ -136,12 +148,18 @@ def main():
     history_path = f"results/history/{datetime.now(timezone.utc):%Y-%m-%d}.csv"
     df.to_csv(history_path, index=False)
 
-    top_picks = df[df["high_confidence_pick"]].sort_values("margin_of_safety", ascending=False)
+    # Ranked by how tightly the two valuation methods agree (real signal),
+    # not by margin-of-safety size (measured noise - see README). Stocks
+    # with only one valuation method (NaN gap) sort last within the list,
+    # since there's nothing to cross-check them against.
+    top_picks = df[df["high_confidence_pick"]].sort_values(
+        ["valuation_gap_pct", "margin_of_safety"], ascending=[True, False], na_position="last"
+    )
     top_picks.to_csv("results/top_picks.csv", index=False)
 
     print(f"Wrote {len(df)} scored tickers to results/latest.csv")
     print(f"Wrote {len(top_picks)} high-confidence picks to results/top_picks.csv")
-    print(top_picks[["ticker", "sector", "price", "fair_value", "margin_of_safety"]].head(20).to_string(index=False))
+    print(top_picks[["ticker", "sector", "price", "fair_value", "valuation_gap_pct", "margin_of_safety"]].head(20).to_string(index=False))
 
 
 if __name__ == "__main__":

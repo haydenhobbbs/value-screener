@@ -69,13 +69,24 @@ stocks where every applicable signal agrees:
 - The stock has a known sector, so the relative-valuation cross-check had a
   real peer group to compare against.
 
-`top_picks.csv` is uncapped - every stock that clears every check ships, sorted
-by margin of safety, which only breaks ties rather than deciding who's on the
-list. In practice this quality bar alone doesn't discriminate much among
-S&P 500 blue chips (most of them are profitable with sane debt), so in a
-broad market pullback the list can run to 100+ names rather than a tidy
-handful. An empty `top_picks.csv` on a given day is a normal, correct outcome
-of a strict filter, not a bug.
+`top_picks.csv` is uncapped - every stock that clears every check ships. In
+practice this quality bar alone doesn't discriminate much among S&P 500 blue
+chips (most of them are profitable with sane debt), so in a broad market
+pullback the list can run to 100+ names rather than a tidy handful. An empty
+`top_picks.csv` on a given day is a normal, correct outcome of a strict
+filter, not a bug.
+
+It's ranked by `valuation_gap_pct` (how closely the DCF and relative-multiple
+estimates agree with each other), not by margin of safety. `track.py`'s
+history backs this up empirically: entry-day margin of safety had ~zero
+correlation with subsequent returns (-0.04), while the gap between the two
+valuation methods correlated at -0.21 - the strongest single signal found so
+far. That tracks with the theory: two independently-built estimates landing
+near the same number is real corroboration; a huge margin of safety is often
+just the DCF (the more assumption-sensitive of the two methods) having gone
+noisy on that particular stock, not the market handing out a rare bargain.
+Margin of safety still gates inclusion (`MIN_EDGE` in `run.py`) - it's just
+not what orders the list anymore.
 
 This still isn't a buy signal. A recent spinoff, divestiture, or accounting
 one-off can distort a company's trailing financials enough to fool every

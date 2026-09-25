@@ -57,11 +57,13 @@ else:
         f"{len(picks)} stocks clear every check today. In a broad market pullback "
         "the quality checks alone don't discriminate much among S&P 500 blue chips, "
         "so this list can run long - it's not a curated shortlist, it's everything "
-        "that passes."
+        "that passes. Ranked by valuation_gap_pct (how closely the DCF and relative "
+        "multiple agree with each other) - the tracker found that mattered a lot "
+        "more than the margin-of-safety size does, which turned out to be mostly noise."
     )
     st.dataframe(
         picks[[
-            "ticker", "sector", "price", "fair_value", "margin_of_safety",
+            "ticker", "sector", "price", "fair_value", "valuation_gap_pct", "margin_of_safety",
             "revenue_not_declining", "profitable", "fcf_positive",
             "debt_reasonable", "analyst_consensus_agrees",
         ]],

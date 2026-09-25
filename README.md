@@ -32,6 +32,57 @@ flagged stocks as candidates for further research, not buy signals.
    (weekdays after market close) and commits the refreshed results back to
    the repo — so the dashboard updates itself with no manual redeploy.
 
+## What DCF actually means
+
+DCF stands for **Discounted Cash Flow**. The core idea: a business is worth
+the cash it will hand its owners in the future — but a dollar you get in 5
+years is worth less than a dollar today, so you shrink ("discount") each
+future dollar down to what it's worth right now, then add them all up.
+
+Two reasons a future dollar is worth less than a today-dollar:
+1. **Opportunity cost** - a dollar today could be invested and grow, so a
+   future dollar has to beat that to be worth waiting for.
+2. **Risk** - the further out and the riskier the business, the less certain
+   that cash actually shows up, so you discount it more.
+
+Here's the actual math `valuation/dcf.py` runs, step by step, using AAPL's
+real numbers from testing this model:
+
+1. **Start with free cash flow (FCF)** - cash the business generates from
+   operations, minus what it has to spend just maintaining itself (capital
+   expenditures). This is the cash that's actually available to hand to
+   owners. AAPL's most recent year: ~$98.7B.
+2. **Project it forward 5 years** at some growth rate, estimated from the
+   company's own FCF history (capped 0-20%, since extreme extrapolations
+   aren't trustworthy). AAPL's FCF was flat over the lookback window, so
+   growth = 0% - the same $98.7B projected for each of the next 5 years.
+3. **Pick a discount rate** (WACC - weighted average cost of capital): the
+   return an investor would demand to accept the risk of *this specific*
+   business, based on how volatile the stock is (beta) and how much debt vs.
+   equity it uses. AAPL came out to about 9.8%.
+4. **Discount each projected year back to today** - divide year 1's cash
+   flow by (1.098)¹, year 2's by (1.098)², etc. Money further in the future
+   gets shrunk more.
+5. **Add a "terminal value"** - everything past year 5, assumed to grow
+   slowly forever (2.5%, roughly GDP growth), also discounted back to today.
+   This is usually the biggest chunk of the total, since "forever" is a lot
+   of cash flow.
+6. **Add it all up** = Enterprise Value - what the whole business (debt +
+   equity together) is worth.
+7. **Subtract net debt** (debt minus cash) = Equity Value - what's left over
+   for shareholders specifically.
+8. **Divide by shares outstanding** = DCF value per share. For AAPL this
+   came out to **$83.56**, against an actual price of $332 - a huge gap,
+   which is exactly the case flagged elsewhere in this doc as the model
+   being too conservative on mega-cap compounders (flat near-term growth
+   plus a 5-year cutoff badly undersells a company that keeps compounding
+   and buying back stock for decades).
+
+That per-share number is what gets compared against the actual stock price -
+if DCF says a stock is worth more than it's trading for, that's one of the
+two signals (alongside relative valuation) the screener looks for agreement
+on.
+
 ## Running it locally
 
 ```bash

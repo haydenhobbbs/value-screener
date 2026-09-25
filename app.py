@@ -1,7 +1,15 @@
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Value Screener", layout="wide")
+
+# Resolve data files relative to this script, not the process's working
+# directory - Streamlit can be launched from elsewhere (e.g. a preview tool
+# or a different cwd on Streamlit Cloud) and relative paths would silently
+# fail to find results/*.csv otherwise.
+RESULTS_DIR = Path(__file__).parent / "results"
 
 st.title("Value Screener")
 st.caption(
@@ -11,7 +19,7 @@ st.caption(
 )
 
 try:
-    df = pd.read_csv("results/latest.csv")
+    df = pd.read_csv(RESULTS_DIR / "latest.csv")
 except FileNotFoundError:
     st.warning(
         "No results yet. Run `python run.py` locally, or wait for the scheduled "
@@ -34,7 +42,7 @@ st.caption(
 )
 
 try:
-    picks = pd.read_csv("results/top_picks.csv")
+    picks = pd.read_csv(RESULTS_DIR / "top_picks.csv")
 except FileNotFoundError:
     picks = pd.DataFrame()
 
@@ -51,6 +59,34 @@ else:
             "revenue_not_declining", "profitable", "fcf_positive",
             "debt_reasonable", "analyst_consensus_agrees",
         ]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+st.divider()
+st.header("Track record")
+st.caption(
+    "How past picks have actually done: entry price is what it cost the day it was "
+    "first flagged as a top pick, current price is today's. Consecutive days the same "
+    "stock stays flagged count as one entry, not a new pick each day. Statistically "
+    "meaningless with only a few weeks of history - this becomes worth trusting only "
+    "after months of runs accumulate."
+)
+
+try:
+    performance = pd.read_csv(RESULTS_DIR / "performance.csv")
+except FileNotFoundError:
+    performance = pd.DataFrame()
+
+if performance.empty:
+    st.info("No closed-out track record yet - check back after the screener has run for a while.")
+else:
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Pick episodes", len(performance))
+    col2.metric("Win rate", f"{(performance['return_pct'] > 0).mean() * 100:.0f}%")
+    col3.metric("Average return", f"{performance['return_pct'].mean():.2f}%")
+    st.dataframe(
+        performance.sort_values("entry_date", ascending=False),
         use_container_width=True,
         hide_index=True,
     )

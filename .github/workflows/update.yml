@@ -22,6 +22,8 @@ jobs:
 
       - run: python run.py
 
+      - run: python track.py
+
       - name: Commit updated results
         run: |
           git config user.name "github-actions[bot]"

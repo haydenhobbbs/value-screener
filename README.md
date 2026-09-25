@@ -21,11 +21,15 @@ flagged stocks as candidates for further research, not buy signals.
    safety**. Stocks priced ≥20% below fair value are flagged as undervalued.
 4. Results are written to `results/latest.csv` (and archived daily under
    `results/history/`).
-5. `app.py` is a Streamlit dashboard that reads `results/latest.csv` and lets
-   you filter/sort the screen.
-6. `.github/workflows/update.yml` runs `run.py` on a schedule (weekdays after
-   market close) and commits the refreshed results back to the repo — so the
-   dashboard updates itself with no manual redeploy.
+5. `track.py` reconstructs the actual top-N pick list from each day's
+   archived snapshot and compares entry price to current price, writing
+   `results/performance.csv` — a real track record of whether past picks
+   panned out, not just today's scores.
+6. `app.py` is a Streamlit dashboard that reads all of the above and lets
+   you filter/sort the screen and see the track record.
+7. `.github/workflows/update.yml` runs `run.py` then `track.py` on a schedule
+   (weekdays after market close) and commits the refreshed results back to
+   the repo — so the dashboard updates itself with no manual redeploy.
 
 ## Running it locally
 

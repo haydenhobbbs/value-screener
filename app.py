@@ -1,135 +1,17 @@
-from pathlib import Path
+from __future__ import annotations
 
-import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Value Screener", layout="wide")
+st.set_page_config(page_title="Stock Screener", layout="wide")
 
-# Resolve data files relative to this script, not the process's working
-# directory - Streamlit can be launched from elsewhere (e.g. a preview tool
-# or a different cwd on Streamlit Cloud) and relative paths would silently
-# fail to find results/*.csv otherwise.
-RESULTS_DIR = Path(__file__).parent / "results"
-
-st.title("Value Screener")
-st.caption(
-    "A fundamentals-based estimate of fair value (blended DCF + sector-relative "
-    "multiples) compared against current price. This is a starting point for "
-    "research, not investment advice."
+# One app, two screeners, switched from the tab bar at the top. st.navigation
+# only runs the page that's open, so the live momentum scanner never slows
+# down the value page (and vice versa).
+page = st.navigation(
+    [
+        st.Page("views/value_page.py", title="Value", icon=":material/account_balance:", url_path="value", default=True),
+        st.Page("views/momentum_page.py", title="Momentum", icon=":material/rocket_launch:", url_path="momentum"),
+    ],
+    position="top",
 )
-
-try:
-    df = pd.read_csv(RESULTS_DIR / "latest.csv")
-except FileNotFoundError:
-    st.warning(
-        "No results yet. Run `python run.py` locally, or wait for the scheduled "
-        "GitHub Action to populate results/latest.csv."
-    )
-    st.stop()
-
-last_updated = df["last_updated"].iloc[0] if "last_updated" in df.columns and len(df) else "unknown"
-st.caption(f"Last updated: {last_updated}")
-
-st.header("High-confidence picks")
-st.caption(
-    "Requires both a DCF and a sector-relative-multiple estimate, and both must agree "
-    "the stock is underpriced - excludes Financial Services/Real Estate (no reliable "
-    "DCF) and any stock whose DCF failed sanity checks, since the track record showed "
-    "DCF-less picks perform measurably worse (14% win rate vs 30%). It also has to pass "
-    "every applicable quality check: revenue not declining, profitable, free-cash-flow "
-    "positive, debt at a sane level, and Wall Street's own analyst consensus "
-    "independently sees upside too. The size of the margin of safety is secondary here "
-    "- agreement across independent signals is the point, not the exact percentage. "
-    "Still not investment advice: read the why-it's-cheap story yourself before acting "
-    "on any of these."
-)
-
-try:
-    picks = pd.read_csv(RESULTS_DIR / "top_picks.csv")
-except FileNotFoundError:
-    picks = pd.DataFrame()
-
-if picks.empty:
-    st.info(
-        "No stock currently clears every check at once. That's a normal, expected "
-        "outcome of a strict filter - it means nothing this run is worth act­ing on, "
-        "not that the screener is broken."
-    )
-else:
-    st.caption(
-        f"{len(picks)} stocks clear every check today. In a broad market pullback "
-        "the quality checks alone don't discriminate much among Russell 3000 blue chips, "
-        "so this list can run long - it's not a curated shortlist, it's everything "
-        "that passes. Ranked by valuation_gap_pct (how closely the DCF and relative "
-        "multiple agree with each other) - the tracker found that mattered a lot "
-        "more than the margin-of-safety size does, which turned out to be mostly noise."
-    )
-    st.dataframe(
-        picks[[
-            "ticker", "sector", "price", "fair_value", "valuation_gap_pct", "margin_of_safety",
-            "revenue_not_declining", "profitable", "fcf_positive",
-            "debt_reasonable", "analyst_consensus_agrees",
-        ]],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-st.divider()
-st.header("Track record")
-st.caption(
-    "How past picks have actually done: entry price is what it cost the day it was "
-    "first flagged as a top pick, current price is today's. Consecutive days the same "
-    "stock stays flagged count as one entry, not a new pick each day. Statistically "
-    "meaningless with only a few weeks of history - this becomes worth trusting only "
-    "after months of runs accumulate."
-)
-
-try:
-    performance = pd.read_csv(RESULTS_DIR / "performance.csv")
-except FileNotFoundError:
-    performance = pd.DataFrame()
-
-if performance.empty:
-    st.info("No closed-out track record yet - check back after the screener has run for a while.")
-else:
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Pick episodes", len(performance))
-    col2.metric("Win rate", f"{(performance['return_pct'] > 0).mean() * 100:.0f}%")
-    col3.metric("Average return", f"{performance['return_pct'].mean():.2f}%")
-    st.dataframe(
-        performance.sort_values("entry_date", ascending=False),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-st.divider()
-st.header("Full screen")
-st.caption("Every Russell 3000 stock scored, for browsing/research beyond the strict picks above.")
-
-sectors = sorted(df["sector"].dropna().unique().tolist())
-col1, col2, col3 = st.columns(3)
-with col1:
-    selected_sectors = st.multiselect("Sector", sectors, default=sectors)
-with col2:
-    min_margin = st.slider("Minimum margin of safety", -0.5, 1.0, 0.0, 0.05)
-with col3:
-    undervalued_only = st.checkbox("Undervalued only (>=20% margin)", value=False)
-
-filtered = df[df["sector"].isin(selected_sectors) & (df["margin_of_safety"] >= min_margin)]
-if undervalued_only:
-    filtered = filtered[filtered["undervalued"]]
-
-st.subheader(f"{len(filtered)} stocks")
-st.dataframe(
-    filtered[[
-        "ticker", "sector", "price", "dcf_value", "relative_value",
-        "fair_value", "margin_of_safety", "undervalued",
-        "quality_checks_passed", "quality_checks_applicable", "market_cap",
-    ]],
-    use_container_width=True,
-    hide_index=True,
-)
-
-st.subheader("Top 20 by margin of safety")
-top20 = filtered.sort_values("margin_of_safety", ascending=False).head(20).set_index("ticker")
-st.bar_chart(top20["margin_of_safety"])
+page.run()

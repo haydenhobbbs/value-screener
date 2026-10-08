@@ -8,6 +8,12 @@ for value-investing research.
 of simplifying assumptions (see "Methodology and limitations" below) — treat
 flagged stocks as candidates for further research, not buy signals.
 
+The app has two tabs at the top:
+
+- **Value** — everything described below (DCF + relative fair value).
+- **Momentum** — a live small-cap momentum scanner using Ross Cameron's
+  (Warrior Trading) "5 pillars". See [Momentum tab](#momentum-tab) at the end.
+
 ## How it works
 
 1. `run.py` pulls fundamentals for every Russell 3000 ticker via `yfinance`.
@@ -174,3 +180,26 @@ earnings history) - always read why a pick is cheap before acting on it.
   "undervalued" and still be a value trap. Read the filings before acting.
 - Universe is the Russell 3000 (effectively all investable US equities) - see valuation/universe.py for the fallback chain - limited to companies with market cap above
   $2B, to avoid illiquid names skewing the sector-median comparisons.
+
+## Momentum tab
+
+`momentum.py` scans every US-listed stock (Nasdaq Trader symbol files) for
+Ross Cameron's 5 pillars: price $2–$20, up 10%+ on the day, 5x relative
+volume (adjusted for time of day), float under 20M shares, and a news
+headline in the last 24 hours. Thresholds are in the CONFIG block at the top
+of the file.
+
+- In the app, it rescans in the background every 60s while the tab is open
+  and pauses after 5 minutes with nobody viewing.
+- From a terminal: `python momentum.py` (one scan) or `python momentum.py --loop`.
+- **Data:** live prices/volume come from the Schwab Market Data API when set
+  up (real-time, includes premarket volume), otherwise Yahoo. Yahoo has no
+  premarket volume, so relative volume shows n/a before 9:30 ET in Yahoo mode.
+  Float and news always come from Yahoo; float can be stale.
+- **Schwab setup** (free with a Schwab account): create an app on
+  developer.schwab.com (Market Data Production, callback
+  `https://127.0.0.1:8182`), copy `.env.example` to `.env` and fill in the
+  key and secret, then run `python momentum.py --schwab-login`. The login
+  lasts 7 days. `.env` and `schwab_token.json` are gitignored.
+- **Best run locally** (`streamlit run app.py`). Schwab only works where
+  you've logged in, and Streamlit Cloud servers often get rate-limited by Yahoo.

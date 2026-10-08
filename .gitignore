@@ -4,3 +4,8 @@ __pycache__/
 venv/
 .DS_Store
 .streamlit/secrets.toml
+
+# momentum screener: local secrets and caches
+.env
+schwab_token.json
+.cache/

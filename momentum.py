@@ -136,7 +136,36 @@ SCHWAB_DEFAULT_CALLBACK = "https://127.0.0.1:8182"
 SCHWAB_REFRESH_TOKEN_DAYS = 7
 MARKET_OPEN_MIN = 9 * 60 + 30
 
-logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
+
+class _YfErrorLog(logging.Handler):
+    """Collects yfinance's error messages (e.g. per-ticker download failures)
+    instead of printing them. Works across yfinance versions; newer ones no
+    longer expose download errors any other way."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.messages: List[Tuple[int, str]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.messages.append((record.thread, record.getMessage()))
+        except Exception:
+            pass
+
+    def take(self) -> List[str]:
+        """Pop and return the messages logged from the calling thread."""
+        me = threading.get_ident()
+        mine = [m for t, m in self.messages if t == me]
+        self.messages = [(t, m) for t, m in self.messages if t != me]
+        return mine
+
+
+_yf_errors = _YfErrorLog()
+_yf_logger = logging.getLogger("yfinance")
+_yf_logger.handlers = [_yf_errors]
+_yf_logger.setLevel(logging.ERROR)
+_yf_logger.propagate = False
 CACHE_DIR.mkdir(exist_ok=True)
 try:
     yf.set_tz_cache_location(str(CACHE_DIR / "yfinance"))
@@ -240,6 +269,7 @@ def load_universe(refresh: bool = False) -> List[str]:
 
 def download_chunk(tickers: List[str], **kwargs) -> Tuple[Dict[str, pd.DataFrame], bool]:
     """One yf.download call. Returns ({ticker: bars}, hit_rate_limit)."""
+    _yf_errors.take()  # discard anything left over from earlier calls
     try:
         df = yf.download(tickers, group_by="ticker", progress=False, auto_adjust=False,
                          threads=DOWNLOAD_THREADS, **kwargs)
@@ -255,8 +285,7 @@ def download_chunk(tickers: List[str], **kwargs) -> Tuple[Dict[str, pd.DataFrame
                     got[t] = bars
         elif len(tickers) == 1:
             got[tickers[0]] = df.dropna(subset=["Close"])
-    errors = getattr(yf.shared, "_ERRORS", {}) or {}
-    return got, any(looks_rate_limited(str(v)) for v in errors.values())
+    return got, any(looks_rate_limited(m) for m in _yf_errors.take())
 
 
 def download_batched(tickers: List[str], label: str, **kwargs) -> Dict[str, pd.DataFrame]:

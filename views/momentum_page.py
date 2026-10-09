@@ -23,7 +23,10 @@ COLUMN_HELP = {
     "News age": "How long ago the latest headline was published.",
     "Headline": "Most recent news headline from the last 24 hours.",
     "Article": "Link to the article.",
-    "First seen": "When this stock first passed every filter today (ET).",
+    "First seen (ET)": (
+        "Eastern time this stock first passed all five pillars today. Lets you tell a "
+        "fresh mover from one that's been on the list for hours. Resets if the app restarts."
+    ),
 }
 
 
@@ -109,7 +112,7 @@ def live_view() -> None:
             "News age": m.fmt_age(published) if published else "",
             "Headline": f"{title} ({provider})" if title and provider else (title or ""),
             "Article": link or None,
-            "First seen": seen.strftime("%H:%M:%S"),
+            "First seen (ET)": seen.astimezone(m.ET).strftime("%I:%M:%S %p").lstrip("0"),
         })
     df = pd.DataFrame(rows)
 
@@ -129,7 +132,7 @@ def live_view() -> None:
             "News age": st.column_config.TextColumn(help=help_["News age"], width="small"),
             "Headline": st.column_config.TextColumn(help=help_["Headline"], width="large"),
             "Article": st.column_config.LinkColumn(help=help_["Article"], display_text="open"),
-            "First seen": st.column_config.TextColumn(help=help_["First seen"]),
+            "First seen (ET)": st.column_config.TextColumn(help=help_["First seen (ET)"]),
         },
     )
 

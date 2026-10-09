@@ -73,6 +73,11 @@ MAX_FLOAT = 20_000_000         # shares
 NEWS_MAX_AGE_HOURS = 24
 REQUIRE_NEWS = True            # False = still show stocks with no fresh headline
 
+# --- Extra tables ---
+# "Today's runners": stocks that hit MIN_PCT_CHANGE at any point today, even if
+# they've faded since. Ignore ones trading below this relative volume (noise).
+RUNNER_MIN_REL_VOLUME = 2.0
+
 # --- How the criteria are measured ---
 AVG_VOLUME_DAYS = 30           # trading days in the average-volume baseline
 # If Yahoo has no float, use shares outstanding instead. Float can never exceed
@@ -122,7 +127,7 @@ BATCH_PAUSE_SECONDS = 0.5      # pause between batches
 DOWNLOAD_THREADS = 8
 MAX_RETRIES = 3                # retries after a rate limit
 RETRY_BACKOFF_SECONDS = 10     # doubles on each retry
-NEWS_CACHE_MINUTES = 5         # in --loop mode, reuse news this long
+NEWS_CACHE_MINUTES = 10        # reuse news lookups this long between scans
 
 HERE = Path(__file__).resolve().parent
 CACHE_DIR = HERE / ".cache"
@@ -369,28 +374,55 @@ def parse_news_item(item: dict) -> Optional[Tuple[str, str, datetime, str]]:
     return title.strip(), provider, published, link
 
 
-_news_cache: Dict[str, Tuple[float, Optional[tuple]]] = {}
+_news_cache: Dict[str, Tuple[float, List[tuple]]] = {}
 
 
-def fetch_latest_news(ticker: str) -> Optional[Tuple[str, str, datetime, str]]:
-    """Newest headline about `ticker` within NEWS_MAX_AGE_HOURS, else None."""
+def fetch_news_items(ticker: str) -> Optional[List[Tuple[str, str, datetime, str]]]:
+    """Recent headlines about `ticker` (title, provider, published UTC, link), newest first.
+    None means the lookup failed and there's no earlier result to fall back on."""
     cached = _news_cache.get(ticker)
     if cached and time.time() - cached[0] < NEWS_CACHE_MINUTES * 60:
         return cached[1]
 
-    items = with_retries(lambda: yf.Ticker(ticker).get_news(count=10), f"{ticker} news") or []
-    if not items:
-        # Yahoo's per-ticker news endpoint is often down; search still works.
-        search = with_retries(lambda: yf.Search(ticker, max_results=1, news_count=10,
-                                                raise_errors=True), f"{ticker} news search")
-        items = [n for n in (search.news if search else [])
-                 if ticker in (n.get("relatedTickers") or [ticker])]
+    # Yahoo search is the reliable source; the per-ticker endpoint is often down.
+    def search_once():
+        return with_retries(lambda: yf.Search(ticker, max_results=1, news_count=20,
+                                              raise_errors=True), f"{ticker} news search")
 
+    search = search_once()
+    if search is not None and not search.news:
+        # When busy, Yahoo sometimes answers with zero articles instead of an error.
+        # Retry once; if still empty but we've seen articles before, keep those.
+        time.sleep(1)
+        search = search_once()
+        if (search is None or not search.news) and cached and cached[1]:
+            return cached[1]
+    if search is not None:
+        items = [n for n in search.news if ticker in (n.get("relatedTickers") or [ticker])]
+    else:
+        items = with_retries(lambda: yf.Ticker(ticker).get_news(count=20), f"{ticker} news") or []
+
+    if search is None and not items:
+        # Lookup failed (usually rate limiting): reuse the last good answer, however
+        # old, rather than reporting "no news". Not cached, so it's retried next scan.
+        return cached[1] if cached else None
+    parsed = sorted((p for p in map(parse_news_item, items) if p), key=lambda p: p[2], reverse=True)
+    _news_cache[ticker] = (time.time(), parsed)
+    return parsed
+
+
+NEWS_LOOKUP_FAILED = "lookup failed"
+
+
+def fetch_latest_news(ticker: str):
+    """Newest headline about `ticker` within NEWS_MAX_AGE_HOURS; None if there isn't one;
+    NEWS_LOOKUP_FAILED if Yahoo couldn't be reached."""
+    items = fetch_news_items(ticker)
+    if items is None:
+        return NEWS_LOOKUP_FAILED
     cutoff = datetime.now(timezone.utc) - timedelta(hours=NEWS_MAX_AGE_HOURS)
-    parsed = [p for p in map(parse_news_item, items) if p and p[2] >= cutoff]
-    latest = max(parsed, key=lambda p: p[2]) if parsed else None
-    _news_cache[ticker] = (time.time(), latest)
-    return latest
+    recent = [p for p in items if p[2] >= cutoff]
+    return recent[0] if recent else None
 
 
 # -------------------------------- Schwab --------------------------------
@@ -520,7 +552,7 @@ class Schwab:
         chunks = [symbols[i:i + SCHWAB_QUOTE_BATCH] for i in range(0, len(symbols), SCHWAB_QUOTE_BATCH)]
         for n, chunk in enumerate(chunks, 1):
             data = self.get("/marketdata/v1/quotes", {"symbols": ",".join(chunk),
-                                                      "fields": "quote,extended,fundamental",
+                                                      "fields": "quote,extended,fundamental,regular",
                                                       "indicative": "false"})
             for sym, q in data.items():
                 if isinstance(q, dict) and sym in back and "quote" in q:
@@ -559,24 +591,11 @@ def avg_volumes(tickers: List[str], session: date) -> Dict[str, Optional[float]]
     return {t: _avg_vol_cache[(session, t)] for t in tickers}
 
 
-def rows_from_quotes(parsed: Dict[str, dict]) -> Tuple[List[dict], date, datetime]:
-    """Turn {ticker: {price, prev_close, traded, volume, fallback_avg}} into rows for
-    stocks already in the price range and up enough, with average volume filled in."""
-    # The newest session anyone has traded in. Tickers that haven't traded in it
-    # yet (e.g. early premarket) are skipped.
+def session_rows(parsed: Dict[str, dict]) -> Tuple[List[dict], date, datetime]:
+    """Rows for every stock that has traded in the newest session. Stocks that
+    haven't traded in it yet (e.g. early premarket) are left out."""
     session = max(p["traded"].date() for p in parsed.values())
-    rows = []
-    for t, p in parsed.items():
-        if p["traded"].date() != session:
-            continue
-        pct = (p["price"] / p["prev_close"] - 1) * 100
-        if MIN_PRICE <= p["price"] <= MAX_PRICE and pct >= MIN_PCT_CHANGE:
-            rows.append({"ticker": t, "price": p["price"], "prev_close": p["prev_close"],
-                         "volume": p["volume"], "avg_vol": None})
-    # Average volume only for the few stocks that are already up enough.
-    avgs = avg_volumes([r["ticker"] for r in rows], session)
-    for r in rows:
-        r["avg_vol"] = avgs.get(r["ticker"]) or parsed[r["ticker"]].get("fallback_avg")
+    rows = [dict(p, ticker=t) for t, p in parsed.items() if p["traded"].date() == session]
     return rows, session, max(p["traded"] for p in parsed.values())
 
 
@@ -592,8 +611,13 @@ def schwab_rows(universe: List[str], schwab: "Schwab", ts: datetime) -> Tuple[Li
         prev_close = quote.get("closePrice")
         if not price or not prev_close or not traded:
             continue
+        same_day = bool(quote.get("tradeTime")) and \
+            ms_to_et(quote["tradeTime"]).date() == ms_to_et(traded).date()
+        regular_last = (q.get("regular") or {}).get("regularMarketLastPrice") or quote.get("lastPrice")
         parsed[t] = {
             "price": float(price), "prev_close": float(prev_close), "traded": ms_to_et(traded),
+            "high": max(float(quote.get("highPrice") or 0), float(price)) if same_day else float(price),
+            "regular_price": float(regular_last) if same_day and regular_last else None,
             "volume": float(max(quote.get("totalVolume") or 0, ext.get("totalVolume") or 0)),
             "fallback_avg": (q.get("fundamental") or {}).get("avg10DaysVolume"),
             "realtime": q.get("realtime"),
@@ -601,7 +625,7 @@ def schwab_rows(universe: List[str], schwab: "Schwab", ts: datetime) -> Tuple[Li
     if not parsed:
         raise RuntimeError("Schwab returned no usable quotes")
 
-    rows, session, newest = rows_from_quotes(parsed)
+    rows, session, newest = session_rows(parsed)
     delayed = sum(1 for p in parsed.values() if p["realtime"] is False)
     meta = {"source": "Schwab", "session": session, "considered": len(parsed), "newest": newest,
             "note": (f"{delayed} quotes flagged delayed by Schwab" if delayed
@@ -656,29 +680,40 @@ def yahoo_rows(universe: List[str], ts: datetime) -> Tuple[Optional[List[dict]],
         traded_et = datetime.fromtimestamp(traded, tz=ET)
         if traded_et.date() > datetime.fromtimestamp(reg_time, tz=ET).date():
             # Premarket: today's regular session hasn't started, so the "regular"
-            # price is yesterday's close. Yahoo has no premarket volume.
-            prev_close, volume = reg_price, 0.0
+            # price is yesterday's close. Yahoo has no premarket volume or high.
+            prev_close, volume, high, regular = reg_price, 0.0, float(price), None
         else:
             prev_close, volume = q.get("regularMarketPreviousClose"), float(q.get("regularMarketVolume") or 0)
+            high = max(float(q.get("regularMarketDayHigh") or 0), float(price))
+            regular = float(reg_price)
         if not prev_close:
             continue
         parsed[t] = {"price": float(price), "prev_close": float(prev_close), "traded": traded_et,
-                     "volume": volume,
+                     "volume": volume, "high": high, "regular_price": regular,
                      "fallback_avg": q.get("averageDailyVolume3Month") or q.get("averageDailyVolume10Day")}
     if not parsed:
         log("No quotes came back from Yahoo (down or rate limiting). Try again shortly.")
         return None, {}
 
-    rows, session, newest = rows_from_quotes(parsed)
+    rows, session, newest = session_rows(parsed)
     meta = {"source": "Yahoo", "session": session, "considered": len(parsed), "newest": newest,
             "note": "Yahoo quotes"}
     return rows, meta
 
 
-def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"]) -> Optional[dict]:
-    """Run one scan. Returns a dict with results and metadata, or None if no data came back."""
+PILLARS = ("price", "change", "volume", "float", "news")
+
+
+def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"],
+         track: Optional[set] = None) -> Optional[dict]:
+    """Run one scan. Returns a dict with results and metadata, or None if no data came back.
+
+    `track` is a set of tickers flagged earlier today; they are always evaluated
+    so the app can show how they've done since, even after they fade.
+    """
     started = time.time()
     ts = now_et()
+    track = track or set()
 
     rows, meta = None, {}
     if schwab:
@@ -698,37 +733,89 @@ def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"]) -> 
     premarket = live and ts.hour * 60 + ts.minute < MARKET_OPEN_MIN
     frac = expected_volume_fraction(ts) if live else 1.0
 
-    stage1 = []
+    # Candidates: up enough and in the price range right now, or ran MIN_PCT_CHANGE
+    # at some point today (runners), or flagged earlier (tracked).
+    cands = []
     for r in rows:
-        price, pct = r["price"], (r["price"] / r["prev_close"] - 1) * 100
-        if not (MIN_PRICE <= price <= MAX_PRICE and pct >= MIN_PCT_CHANGE):
-            continue
-        rvol = r["volume"] / (r["avg_vol"] * frac) if r["volume"] > 0 and r["avg_vol"] else None
-        if rvol is None:
-            if not (premarket and PASS_UNKNOWN_RVOL_PREMARKET):
-                continue
-        elif rvol < MIN_REL_VOLUME:
-            continue
-        stage1.append({"ticker": r["ticker"], "price": price, "pct": pct, "rvol": rvol})
+        r["pct"] = (r["price"] / r["prev_close"] - 1) * 100
+        r["high_pct"] = (r["high"] / r["prev_close"] - 1) * 100
+        r["moving"] = MIN_PRICE <= r["price"] <= MAX_PRICE and r["pct"] >= MIN_PCT_CHANGE
+        r["ran"] = (r["high_pct"] >= MIN_PCT_CHANGE and r["high"] >= MIN_PRICE
+                    and r["prev_close"] <= MAX_PRICE)
+        if r["moving"] or r["ran"] or r["ticker"] in track:
+            cands.append(r)
 
-    # Stage 2: float, then news, only for the handful that passed stage 1.
-    stage2 = []
-    for row in stage1:
-        flt, fallback = fetch_float(row["ticker"], float_cache)
-        if flt is None or flt >= MAX_FLOAT:
+    # Average volume only for the candidates (one small download, cached per day).
+    avgs = avg_volumes([r["ticker"] for r in cands], session)
+    for r in cands:
+        avg = avgs.get(r["ticker"]) or r.get("fallback_avg")
+        r["rvol"] = r["volume"] / (avg * frac) if r["volume"] > 0 and avg else None
+        r["runner"] = r["ran"] and (r["rvol"] is None or r["rvol"] >= RUNNER_MIN_REL_VOLUME)
+
+    # Float and news only for stocks that could appear in one of the tables.
+    evaluated = []
+    for r in cands:
+        if not (r["moving"] or r["runner"] or r["ticker"] in track):
             continue
-        row.update(float=flt, float_fallback=fallback)
-        stage2.append(row)
-    for row in stage2:
-        row["news"] = fetch_latest_news(row["ticker"])
-    results = [r for r in stage2 if r["news"] or not REQUIRE_NEWS]
-    results.sort(key=lambda r: r["pct"], reverse=True)
+        r["float"], r["float_fallback"] = fetch_float(r["ticker"], float_cache)
+        # News only matters for stocks that are moving now; skipping faded runners
+        # roughly halves the requests to Yahoo.
+        news = fetch_latest_news(r["ticker"]) if r["moving"] else None
+        r["news_failed"] = news == NEWS_LOOKUP_FAILED
+        r["news"] = None if r["news_failed"] else news
+        rvol_unknown_ok = r["rvol"] is None and premarket and PASS_UNKNOWN_RVOL_PREMARKET
+        r["pillars"] = {
+            "price": MIN_PRICE <= r["price"] <= MAX_PRICE,
+            "change": r["pct"] >= MIN_PCT_CHANGE,
+            "volume": rvol_unknown_ok or (r["rvol"] is not None and r["rvol"] >= MIN_REL_VOLUME),
+            "float": r["float"] is not None and r["float"] < MAX_FLOAT,
+            "news": r["news"] is not None or not REQUIRE_NEWS,
+        }
+        checked = PILLARS if r["moving"] else PILLARS[:-1]  # news not checked for faded runners
+        r["missing"] = [pillar_failure(r, k) for k in checked if not r["pillars"][k]]
+        evaluated.append(r)
+
+    results = [r for r in evaluated if not r["missing"] and r["moving"]]
+    near_misses = [r for r in evaluated if len(r["missing"]) == 1
+                   and r["pillars"]["price"] and r["pillars"]["change"]]
+    runners = [r for r in evaluated if r["runner"] or r["ticker"] in track]
+    for r in runners:
+        r["status"] = ("On the list" if not r["missing"] else
+                       "Near miss: " + r["missing"][0] if r in near_misses else
+                       "; ".join(r["missing"]))
+    for table in (results, near_misses):
+        table.sort(key=lambda r: r["pct"], reverse=True)
+    runners.sort(key=lambda r: r["high_pct"], reverse=True)
+
+    p = [r["pillars"] for r in evaluated]
+    stage1 = sum(1 for x in p if x["price"] and x["change"] and x["volume"])
+    stage2 = sum(1 for x in p if x["price"] and x["change"] and x["volume"] and x["float"])
 
     save_float_cache(float_cache)
     days = schwab.login_days_left() if schwab else None
-    return {"results": results, "ts": ts, "meta": meta, "live": live, "premarket": premarket,
+    return {"results": results, "near_misses": near_misses, "runners": runners,
+            "prices": {r["ticker"]: {"price": r["price"], "regular_price": r.get("regular_price")}
+                       for r in evaluated},
+            "ts": ts, "meta": meta, "live": live, "premarket": premarket,
             "elapsed": time.time() - started, "schwab_days_left": days,
-            "funnel": [len(universe), meta["considered"], len(stage1), len(stage2), len(results)]}
+            "funnel": [len(universe), meta["considered"], stage1, stage2, len(results)]}
+
+
+def pillar_failure(r: dict, pillar: str) -> str:
+    """Short plain-English reason a stock fails one pillar."""
+    if pillar == "price":
+        return f"Price ${r['price']:.2f} outside ${MIN_PRICE:g}-${MAX_PRICE:g}"
+    if pillar == "change":
+        return f"Faded to {r['pct']:+.1f}%"
+    if pillar == "volume":
+        return ("Volume unknown" if r["rvol"] is None
+                else f"Volume {r['rvol']:.1f}x (needs {MIN_REL_VOLUME:g}x)")
+    if pillar == "float":
+        return ("Float unknown" if r["float"] is None
+                else f"Float {r['float'] / 1e6:.1f}M (over {MAX_FLOAT / 1e6:g}M)")
+    if r.get("news_failed"):
+        return "News lookup failed (Yahoo busy)"
+    return "No news on Yahoo in 24h"
 
 
 def run_scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"]) -> None:
@@ -787,6 +874,7 @@ def print_report(res: dict) -> None:
 
     if not results:
         print("No stocks match right now.")
+        print_extra_tables(res)
         return
 
     header = f"{'#':>2}  {'Ticker':<6} {'Price':>7} {'Chg%':>7} {'RVol':>6} {'Float':>7}  {'Age':>4}  Headline"
@@ -805,6 +893,18 @@ def print_report(res: dict) -> None:
         print(line + (headline if len(headline) <= room else headline[:room - 1] + "…"))
     if any(r["float_fallback"] for r in results):
         print("* no float on Yahoo; showing shares outstanding (the float is at most this).")
+    print_extra_tables(res)
+
+
+def print_extra_tables(res: dict) -> None:
+    if res.get("near_misses"):
+        print("\nNear misses (4 of 5 pillars):")
+        for r in res["near_misses"]:
+            print(f"  {r['ticker']:<6} {r['price']:>7.2f} {r['pct']:>6.1f}%  {r['missing'][0]}")
+    if res.get("runners"):
+        print("\nToday's runners (hit +%g%% at some point):" % MIN_PCT_CHANGE)
+        for r in res["runners"]:
+            print(f"  {r['ticker']:<6} high {r['high_pct']:>+6.1f}%  now {r['pct']:>+6.1f}%  {r['status']}")
 
 
 # -------------------------- background scanner --------------------------
@@ -826,7 +926,8 @@ class BackgroundScanner:
         self.status = "Starting..."
         self.scanning = False
         self.error: Optional[str] = None
-        self.first_seen: Dict[Tuple[date, str], datetime] = {}
+        # (session, ticker) -> {"time": when first flagged, "price": price then}
+        self.first_seen: Dict[Tuple[date, str], dict] = {}
         self.last_view = time.time()
 
     def touch(self) -> None:
@@ -866,14 +967,17 @@ class BackgroundScanner:
                     self.error, self.scanning = f"Could not load the ticker list: {e}", False
                     return
             try:
-                res = scan(universe, float_cache, schwab)
+                last_session = self.latest["meta"]["session"] if self.latest else now_et().date()
+                track = {t for (sess, t) in self.first_seen if sess == last_session}
+                res = scan(universe, float_cache, schwab, track)
                 if res is None:
                     self.error = "No price data came back (Yahoo down or rate limiting). Retrying."
                 else:
                     session = res["meta"]["session"]
                     with self._lock:
                         for r in res["results"]:
-                            self.first_seen.setdefault((session, r["ticker"]), res["ts"])
+                            self.first_seen.setdefault((session, r["ticker"]),
+                                                       {"time": res["ts"], "price": r["price"]})
                         self.latest = res
             except Exception as e:
                 self.error = f"Scan failed: {e!r}"
@@ -925,7 +1029,7 @@ def main() -> None:
     if args.schwab_test:
         sym = args.schwab_test.upper().replace("-", "/")
         print(json.dumps(schwab.get("/marketdata/v1/quotes", {
-            "symbols": sym, "fields": "quote,extended,fundamental", "indicative": "false"}), indent=2))
+            "symbols": sym, "fields": "quote,extended,fundamental,regular", "indicative": "false"}), indent=2))
         return
     if schwab and args.source == "auto" and not schwab.has_token():
         log("Schwab keys found but not logged in yet; using Yahoo. Run --schwab-login.")

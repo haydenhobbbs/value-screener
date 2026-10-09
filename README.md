@@ -192,6 +192,17 @@ of the file.
 - In the app, it rescans in the background every 60s while the tab is open
   and pauses after 5 minutes with nobody viewing.
 - From a terminal: `python momentum.py` (one scan) or `python momentum.py --loop`.
+- The tab has three tables: **Matches** (all 5 pillars), **Near misses** (moving
+  and in range but failing exactly one pillar, with the reason), and **Today's
+  runners** (everything that hit +10% at any point today, even if it faded).
+- **Since flag % / win rate:** each flagged stock remembers its price when it
+  was first flagged. The tab shows how many of today's flagged stocks you'd be
+  up on if you'd bought at that price and sold now (after 4 PM: at the close).
+  Resets when the app restarts.
+- **Replay a day:** `python replay.py` re-runs the most recent session minute by
+  minute and reports when each stock would have been flagged, its peak after
+  the flag, and the hold-to-close win rate. `--tickers` / `--date` for specific
+  stocks or another day in the last ~7 (Yahoo's 1-minute data limit).
 - **Data:** live prices/volume come from the Schwab Market Data API when set
   up (real-time, includes premarket volume), otherwise Yahoo. Yahoo has no
   premarket volume, so relative volume shows n/a before 9:30 ET in Yahoo mode.

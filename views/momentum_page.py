@@ -65,12 +65,16 @@ def live_view() -> None:
         st.caption(snap["status"])
 
     if res is None:
-        st.write(
-            "Waiting for the first scan. The first scan of the day downloads 3 months of "
-            "history for every stock and can take a few minutes; after that each scan "
-            "is much faster."
-        )
+        st.write("Waiting for the first scan. It usually takes under a minute.")
         return
+
+    # Never let old results pass for current ones.
+    age_min = (m.now_et() - res["ts"]).total_seconds() / 60
+    if age_min > max(5, 3 * m.LOOP_SECONDS / 60):
+        when = res["ts"].strftime("%a %b %d, %I:%M %p ET")
+        st.warning(f"These results are from {when} ({age_min:.0f} min ago). "
+                   + ("A new scan is running." if snap["scanning"] else "Click Scan now to refresh."),
+                   icon=":material/schedule:")
 
     header = m.report_header(res)
     st.subheader(header[0])

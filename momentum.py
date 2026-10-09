@@ -19,7 +19,7 @@ Usage (also runs as the "Momentum" tab in app.py):
     python momentum.py                 # one scan
     python momentum.py --loop          # rescan every LOOP_SECONDS
     python momentum.py --tickers GME,AMC,PLUG   # scan only these (quick test)
-    python momentum.py --refresh       # ignore today's cached universe/history
+    python momentum.py --refresh       # re-download today's ticker list
     python momentum.py --source yahoo  # force Yahoo even if Schwab is set up
     python momentum.py --schwab-login  # Schwab login (first time, then every 7 days)
     python momentum.py --schwab-test AAPL   # show Schwab's raw quote (debugging)
@@ -27,9 +27,11 @@ Usage (also runs as the "Momentum" tab in app.py):
 DATA DELAY - read this:
   * Each scan prints how old the newest price is and how long the scan took.
   * Schwab: real-time quotes, including premarket trades and volume.
-  * Yahoo (fallback): usually within a minute or two of live, no guarantee.
-    Yahoo reports 0 volume on premarket bars, so relative volume can't be
-    measured before 9:30 ET in Yahoo mode (see PASS_UNKNOWN_RVOL_PREMARKET).
+  * Yahoo (fallback): batch quotes, ~30 requests for the whole market. Measured
+    within a minute or two of live, though Yahoo labels Nasdaq/NYSE data as
+    15-20 min delayed, so no guarantee. Yahoo has no premarket volume, so
+    relative volume can't be measured before 9:30 ET in Yahoo mode (see
+    PASS_UNKNOWN_RVOL_PREMARKET).
   * Float comes from Yahoo's company profile, which updates slowly and can be
     weeks out of date after offerings or reverse splits. Double-check it.
   * News comes from Yahoo search results and can lag the wire by several minutes.
@@ -114,8 +116,8 @@ SCHWAB_QUOTE_BATCH = 300       # symbols per Schwab quotes request
 
 # --- Speed / rate limits ---
 LOOP_SECONDS = 60              # pause between scans in --loop mode
-INTRADAY_INTERVAL = "5m"       # "1m" = fresher bars but ~5x more data per scan
-BATCH_SIZE = 150               # tickers per yfinance download call
+YAHOO_QUOTE_BATCH = 200        # symbols per Yahoo quote request
+BATCH_SIZE = 150               # tickers per yfinance download call (average volume)
 BATCH_PAUSE_SECONDS = 0.5      # pause between batches
 DOWNLOAD_THREADS = 8
 MAX_RETRIES = 3                # retries after a rate limit
@@ -129,6 +131,7 @@ SCHWAB_TOKEN_FILE = HERE / "schwab_token.json"  # written by --schwab-login
 # ========================================================================
 
 ET = ZoneInfo("America/New_York")
+YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
 SCHWAB_API = "https://api.schwabapi.com"
 SCHWAB_AUTHORIZE_URL = SCHWAB_API + "/v1/oauth/authorize"
 SCHWAB_TOKEN_URL = SCHWAB_API + "/v1/oauth/token"
@@ -311,49 +314,6 @@ def download_batched(tickers: List[str], label: str, **kwargs) -> Dict[str, pd.D
     return out
 
 
-def load_daily_history(tickers: List[str], refresh: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Daily closes and volumes (dates x tickers), cached once per day."""
-    cache = CACHE_DIR / f"daily_{now_et().date()}.pkl"
-    if cache.exists() and not refresh:
-        with open(cache, "rb") as f:
-            closes, volumes = pickle.load(f)
-        missing = [t for t in tickers if t not in closes.columns]
-        if len(missing) <= len(tickers) * 0.5:
-            return closes, volumes
-
-    log("Downloading ~3 months of daily history (once per day, cached)...")
-    data = download_batched(tickers, "daily history", period="3mo", interval="1d")
-    closes = pd.DataFrame({t: df["Close"] for t, df in data.items()})
-    volumes = pd.DataFrame({t: df["Volume"] for t, df in data.items()})
-    closes.index = pd.to_datetime(closes.index).tz_localize(None).normalize()
-    volumes.index = closes.index
-    with open(cache, "wb") as f:
-        pickle.dump((closes, volumes), f)
-    return closes, volumes
-
-
-def intraday_snapshot(tickers: List[str]) -> Dict[str, dict]:
-    """Latest price and today's volume (incl. pre/post market) per ticker."""
-    data = download_batched(tickers, "intraday", period="1d",
-                            interval=INTRADAY_INTERVAL, prepost=True)
-    snap = {}
-    for t, bars in data.items():
-        idx = bars.index
-        idx = idx.tz_localize("UTC") if idx.tz is None else idx
-        idx = idx.tz_convert(ET)
-        session = idx[-1].date()
-        day = bars[idx.date == session]
-        if day.empty:
-            continue
-        snap[t] = {
-            "session": session,
-            "price": float(day["Close"].iloc[-1]),
-            "volume": float(day["Volume"].fillna(0).sum()),
-            "last_bar": idx[-1],
-        }
-    return snap
-
-
 # -------------------------------- metrics -------------------------------
 
 def expected_volume_fraction(ts: datetime) -> float:
@@ -370,14 +330,6 @@ def expected_volume_fraction(ts: datetime) -> float:
                 frac = f0 + (f1 - f0) * (minutes - m0) / (m1 - m0)
                 break
     return max(frac, MIN_VOLUME_FRACTION)
-
-
-def baseline_for(session: date, closes: pd.DataFrame, volumes: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
-    """Previous close and average daily volume as of the day before `session`."""
-    before = closes.index < pd.Timestamp(session)
-    prev_close = closes[before].ffill().iloc[-1] if before.any() else pd.Series(dtype=float)
-    avg_vol = volumes[before].tail(AVG_VOLUME_DAYS).mean() if before.any() else pd.Series(dtype=float)
-    return prev_close, avg_vol
 
 
 def fetch_float(ticker: str, cache: dict) -> Tuple[Optional[float], bool]:
@@ -607,11 +559,29 @@ def avg_volumes(tickers: List[str], session: date) -> Dict[str, Optional[float]]
     return {t: _avg_vol_cache[(session, t)] for t in tickers}
 
 
+def rows_from_quotes(parsed: Dict[str, dict]) -> Tuple[List[dict], date, datetime]:
+    """Turn {ticker: {price, prev_close, traded, volume, fallback_avg}} into rows for
+    stocks already in the price range and up enough, with average volume filled in."""
+    # The newest session anyone has traded in. Tickers that haven't traded in it
+    # yet (e.g. early premarket) are skipped.
+    session = max(p["traded"].date() for p in parsed.values())
+    rows = []
+    for t, p in parsed.items():
+        if p["traded"].date() != session:
+            continue
+        pct = (p["price"] / p["prev_close"] - 1) * 100
+        if MIN_PRICE <= p["price"] <= MAX_PRICE and pct >= MIN_PCT_CHANGE:
+            rows.append({"ticker": t, "price": p["price"], "prev_close": p["prev_close"],
+                         "volume": p["volume"], "avg_vol": None})
+    # Average volume only for the few stocks that are already up enough.
+    avgs = avg_volumes([r["ticker"] for r in rows], session)
+    for r in rows:
+        r["avg_vol"] = avgs.get(r["ticker"]) or parsed[r["ticker"]].get("fallback_avg")
+    return rows, session, max(p["traded"] for p in parsed.values())
+
+
 def schwab_rows(universe: List[str], schwab: "Schwab", ts: datetime) -> Tuple[List[dict], dict]:
     quotes = schwab.quotes(universe)
-    if not quotes:
-        raise RuntimeError("Schwab returned no quotes")
-
     parsed = {}
     for t, q in quotes.items():
         quote, ext = q.get("quote") or {}, q.get("extended") or {}
@@ -625,70 +595,87 @@ def schwab_rows(universe: List[str], schwab: "Schwab", ts: datetime) -> Tuple[Li
         parsed[t] = {
             "price": float(price), "prev_close": float(prev_close), "traded": ms_to_et(traded),
             "volume": float(max(quote.get("totalVolume") or 0, ext.get("totalVolume") or 0)),
-            "avg10": (q.get("fundamental") or {}).get("avg10DaysVolume"),
+            "fallback_avg": (q.get("fundamental") or {}).get("avg10DaysVolume"),
             "realtime": q.get("realtime"),
         }
+    if not parsed:
+        raise RuntimeError("Schwab returned no usable quotes")
 
-    session = max(p["traded"].date() for p in parsed.values())
-    rows = []
-    for t, p in parsed.items():
-        if p["traded"].date() != session:
-            continue
-        pct = (p["price"] / p["prev_close"] - 1) * 100
-        if MIN_PRICE <= p["price"] <= MAX_PRICE and pct >= MIN_PCT_CHANGE:
-            rows.append({"ticker": t, "price": p["price"], "prev_close": p["prev_close"],
-                         "volume": p["volume"], "avg_vol": None, "avg10": p["avg10"]})
-
-    # Average volume only for the few stocks that are already up enough.
-    avgs = avg_volumes([r["ticker"] for r in rows], session)
-    for r in rows:
-        r["avg_vol"] = avgs.get(r["ticker"]) or r.pop("avg10", None)
-        r.pop("avg10", None)
-
+    rows, session, newest = rows_from_quotes(parsed)
     delayed = sum(1 for p in parsed.values() if p["realtime"] is False)
-    meta = {"source": "Schwab", "session": session, "considered": len(parsed),
-            "newest": max(p["traded"] for p in parsed.values()),
+    meta = {"source": "Schwab", "session": session, "considered": len(parsed), "newest": newest,
             "note": (f"{delayed} quotes flagged delayed by Schwab" if delayed
                      else "Schwab real-time quotes")}
     return rows, meta
 
 
-def yahoo_rows(universe: List[str], refresh: bool, ts: datetime) -> Tuple[Optional[List[dict]], dict]:
-    closes, volumes = load_daily_history(universe, refresh)
+def yahoo_quotes(tickers: List[str]) -> Dict[str, dict]:
+    """Yahoo's batch quote endpoint: ~200 symbols per request, so the whole
+    market is ~30 requests. Uses yfinance's session (cookies + crumb)."""
+    from yfinance.data import YfData
 
-    # Pre-filter: to be <= MAX_PRICE now while up MIN_PCT_CHANGE, the previous
-    # close must be <= MAX_PRICE / (1 + MIN_PCT_CHANGE%). Saves a lot of downloads.
-    cutoff = MAX_PRICE / (1 + MIN_PCT_CHANGE / 100)
-    recent_low = closes.ffill().tail(2).min()
-    candidates = [t for t in universe if t in recent_low.index and 0 < recent_low[t] <= cutoff]
-    log(f"Pre-filter: {len(candidates)} of {len(universe)} tickers closed recently at "
-        f"or below ${cutoff:.2f}")
+    out: Dict[str, dict] = {}
+    chunks = [tickers[i:i + YAHOO_QUOTE_BATCH] for i in range(0, len(tickers), YAHOO_QUOTE_BATCH)]
+    failed = 0
+    for n, chunk in enumerate(chunks, 1):
+        params = {"symbols": ",".join(chunk), "formatted": "false"}
+        data = with_retries(lambda: YfData().get_raw_json(YAHOO_QUOTE_URL, params=params),
+                            f"Yahoo quotes batch {n}")
+        result = ((data or {}).get("quoteResponse") or {}).get("result") or []
+        if not result:
+            failed += 1
+        wanted = set(chunk)
+        for q in result:
+            if q.get("symbol") in wanted:
+                out[q["symbol"]] = q
+        progress(f"  Yahoo quotes: batch {n}/{len(chunks)} ({len(out)} quoted)")
+        if n < len(chunks):
+            time.sleep(BATCH_PAUSE_SECONDS)
+    if not status_hook:
+        print(file=sys.stderr)
+    if failed:
+        log(f"  {failed} of {len(chunks)} Yahoo quote batches came back empty")
+    return out
 
-    snap = intraday_snapshot(candidates)
-    if not snap:
-        log("No intraday data came back (Yahoo down or rate limited). Try again shortly.")
+
+def yahoo_rows(universe: List[str], ts: datetime) -> Tuple[Optional[List[dict]], dict]:
+    quotes = yahoo_quotes(universe)
+    parsed = {}
+    for t, q in quotes.items():
+        if q.get("quoteType") not in (None, "EQUITY"):
+            continue
+        reg_price, reg_time = q.get("regularMarketPrice"), q.get("regularMarketTime") or 0
+        price, traded = reg_price, reg_time
+        # Use the premarket/after-hours price if it is newer than the regular one.
+        for p_key, t_key in (("preMarketPrice", "preMarketTime"), ("postMarketPrice", "postMarketTime")):
+            p, t_ = q.get(p_key), q.get(t_key) or 0
+            if p and t_ > traded:
+                price, traded = p, t_
+        if not price or not traded or not reg_price:
+            continue
+        traded_et = datetime.fromtimestamp(traded, tz=ET)
+        if traded_et.date() > datetime.fromtimestamp(reg_time, tz=ET).date():
+            # Premarket: today's regular session hasn't started, so the "regular"
+            # price is yesterday's close. Yahoo has no premarket volume.
+            prev_close, volume = reg_price, 0.0
+        else:
+            prev_close, volume = q.get("regularMarketPreviousClose"), float(q.get("regularMarketVolume") or 0)
+        if not prev_close:
+            continue
+        parsed[t] = {"price": float(price), "prev_close": float(prev_close), "traded": traded_et,
+                     "volume": volume,
+                     "fallback_avg": q.get("averageDailyVolume3Month") or q.get("averageDailyVolume10Day")}
+    if not parsed:
+        log("No quotes came back from Yahoo (down or rate limiting). Try again shortly.")
         return None, {}
 
-    # Use the most recent session any ticker has traded in. Tickers that haven't
-    # traded yet in that session (e.g. early premarket) are skipped.
-    session = max(s["session"] for s in snap.values())
-    prev_close, avg_vol = baseline_for(session, closes, volumes)
-    rows = []
-    for t, s in snap.items():
-        pc = prev_close.get(t)
-        if s["session"] != session or not pc or pd.isna(pc):
-            continue
-        av = avg_vol.get(t)
-        rows.append({"ticker": t, "price": s["price"], "prev_close": float(pc),
-                     "volume": s["volume"], "avg_vol": None if av is None or pd.isna(av) else float(av)})
-    meta = {"source": "Yahoo", "session": session, "considered": len(candidates),
-            "newest": max(s["last_bar"] for s in snap.values()),
-            "note": "Yahoo intraday bars"}
+    rows, session, newest = rows_from_quotes(parsed)
+    meta = {"source": "Yahoo", "session": session, "considered": len(parsed), "newest": newest,
+            "note": "Yahoo quotes"}
     return rows, meta
 
 
-def scan(universe: List[str], refresh: bool, float_cache: dict,
-         schwab: Optional["Schwab"]) -> Optional[dict]:
+def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"]) -> Optional[dict]:
     """Run one scan. Returns a dict with results and metadata, or None if no data came back."""
     started = time.time()
     ts = now_et()
@@ -702,7 +689,7 @@ def scan(universe: List[str], refresh: bool, float_cache: dict,
         except Exception as e:
             log(f"Schwab failed ({e!r}). Using Yahoo for this scan.")
     if rows is None:
-        rows, meta = yahoo_rows(universe, refresh, ts)
+        rows, meta = yahoo_rows(universe, ts)
         if rows is None:
             return None
 
@@ -744,8 +731,8 @@ def scan(universe: List[str], refresh: bool, float_cache: dict,
             "funnel": [len(universe), meta["considered"], len(stage1), len(stage2), len(results)]}
 
 
-def run_scan(universe: List[str], refresh: bool, float_cache: dict, schwab: Optional["Schwab"]) -> None:
-    res = scan(universe, refresh, float_cache, schwab)
+def run_scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"]) -> None:
+    res = scan(universe, float_cache, schwab)
     if res:
         print_report(res)
 
@@ -769,8 +756,7 @@ def report_header(res: dict) -> List[str]:
     phase = "PREMARKET" if premarket else ("LIVE" if live else f"LAST SESSION ({session})")
     lines = [f"Momentum scan  {ts:%Y-%m-%d %H:%M:%S} ET  [{phase}]  source: {source}"]
     if live:
-        what = "trade" if source == "Schwab" else "bar"
-        lines.append(f"Data delay: newest {source} {what} is from {newest:%H:%M:%S} ET, "
+        lines.append(f"Data delay: newest {source} trade is from {newest:%H:%M:%S} ET, "
                      f"{lag_min:.1f} min before the scan started. The scan took {res['elapsed']:.0f}s, "
                      f"so the oldest prices are about {lag_min + res['elapsed'] / 60:.1f} min old. "
                      f"({meta['note']})")
@@ -785,8 +771,7 @@ def report_header(res: dict) -> List[str]:
         lines.append(f"Heads up: Schwab login expires in {max(days, 0) * 24:.0f}h. "
                      "Run: python momentum.py --schwab-login")
     u, c, s1, s2, final = res["funnel"]
-    first = "quoted" if source == "Schwab" else "under price cutoff"
-    lines.append(f"Funnel: {u} tickers -> {c} {first} -> {s1} pass price/%chg/RVOL "
+    lines.append(f"Funnel: {u} tickers -> {c} quoted -> {s1} pass price/%chg/RVOL "
                  f"-> {s2} pass float -> {final} with news")
     return lines
 
@@ -866,20 +851,22 @@ class BackgroundScanner:
     def _run(self) -> None:
         global status_hook
         status_hook = self._set_status
-        try:
-            universe = load_universe()
-            schwab = Schwab.from_env()
-            if schwab and not schwab.has_token():
-                schwab = None
-            float_cache = load_float_cache()
-        except BaseException as e:  # load_universe calls sys.exit on failure
-            self.error = f"Could not load the ticker list: {e}"
-            return
+        schwab = Schwab.from_env()
+        if schwab and not schwab.has_token():
+            schwab = None
+        loaded_for, universe, float_cache = None, [], {}
 
         while time.time() - self.last_view < self.idle_stop:
             self.scanning, self.error = True, None
+            if loaded_for != now_et().date():  # new day: fresh ticker list and floats
+                try:
+                    universe, float_cache = load_universe(), load_float_cache()
+                    loaded_for = now_et().date()
+                except BaseException as e:  # load_universe calls sys.exit on failure
+                    self.error, self.scanning = f"Could not load the ticker list: {e}", False
+                    return
             try:
-                res = scan(universe, False, float_cache, schwab)
+                res = scan(universe, float_cache, schwab)
                 if res is None:
                     self.error = "No price data came back (Yahoo down or rate limiting). Retrying."
                 else:
@@ -919,7 +906,7 @@ def main() -> None:
     parser.add_argument("--loop", action="store_true", help=f"rescan every {LOOP_SECONDS}s")
     parser.add_argument("--every", type=int, default=LOOP_SECONDS, help="seconds between scans in --loop mode")
     parser.add_argument("--tickers", help="comma-separated tickers to scan instead of the full universe")
-    parser.add_argument("--refresh", action="store_true", help="re-download today's universe and daily history")
+    parser.add_argument("--refresh", action="store_true", help="re-download today's ticker list")
     parser.add_argument("--source", choices=["auto", "schwab", "yahoo"], default=DATA_SOURCE,
                         help="where live prices and volume come from")
     parser.add_argument("--schwab-login", action="store_true", help="log in to Schwab (needed every 7 days)")
@@ -952,15 +939,13 @@ def main() -> None:
     log(f"Universe: {len(universe)} tickers")
 
     float_cache = load_float_cache()
-    refresh = args.refresh and not args.tickers
     while True:
         try:
-            run_scan(universe, refresh, float_cache, schwab)
+            run_scan(universe, float_cache, schwab)
         except KeyboardInterrupt:
             raise
         except Exception as e:  # never let one bad scan kill the loop
             log(f"Scan failed: {e!r}")
-        refresh = False
         if not args.loop:
             break
         log(f"Next scan in {args.every}s (Ctrl+C to stop)")

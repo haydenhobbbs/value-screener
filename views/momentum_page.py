@@ -34,7 +34,6 @@ COLUMN_HELP = {
         "Gain or loss from the flag price to now (after 4 PM: to the 4 PM close). "
         "Assumes a fill at the flag price, which on fast small caps is optimistic."
     ),
-    "Missing": "The one pillar this stock fails.",
     "Score": (
         "Experimental 0-100 rank: smaller float, fresher news, earlier in the move and "
         "higher volume score higher. Built from one day's replay; the Track record "
@@ -147,7 +146,6 @@ def live_view() -> None:
 
     matches_section(res, flags, since_flag)
     win_rate_section(flags, since_flag, after_close)
-    near_miss_section(res)
     runners_section(res, flags, since_flag)
 
 
@@ -196,30 +194,6 @@ def win_rate_section(flags, since_flag, after_close) -> None:
         "including ones that have since faded off the list. Fills at the flag price are "
         "optimistic; this is a scorecard, not a strategy."
     )
-
-
-def near_miss_section(res) -> None:
-    st.markdown("### Near misses: 4 of 5 pillars")
-    st.caption("Moving and in the price range, but failing exactly one pillar. Check these "
-               "yourself: Yahoo's small-cap news coverage is thin, so \"no news\" often "
-               "just means Yahoo missed it.")
-    if not res["near_misses"]:
-        st.info("No near misses right now.")
-        return
-    rows = [{
-        "Ticker": r["ticker"], "Score": r["score"], "Price": r["price"], "Change %": r["pct"],
-        "Rel volume": r["rvol"], "Float (M)": r["float"] / 1e6 if r["float"] else None,
-        "Missing": r["missing"][0],
-        **news_cols(r),
-    } for r in res["near_misses"]]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
-        "Ticker": col("text", "Ticker", width="small"), "Score": col("score", "Score", width="small"),
-        "Price": col("money", "Price"),
-        "Change %": col("pct", "Change %"), "Rel volume": col("x", "Rel volume"),
-        "Float (M)": col("num", "Float (M)"), "Missing": col("text", "Missing", width="medium"),
-        "News age": col("text", "News age", width="small"),
-        "Headline": col("text", "Headline", width="large"), "Article": col("link", "Article"),
-    })
 
 
 def runners_section(res, flags, since_flag) -> None:

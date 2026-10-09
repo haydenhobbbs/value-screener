@@ -192,9 +192,9 @@ of the file.
 - In the app, it rescans in the background every 60s while the tab is open
   and pauses after 5 minutes with nobody viewing.
 - From a terminal: `python momentum.py` (one scan) or `python momentum.py --loop`.
-- The tab has three tables: **Matches** (all 5 pillars), **Near misses** (moving
-  and in range but failing exactly one pillar, with the reason), and **Today's
-  runners** (everything that hit +10% at any point today, even if it faded).
+- The tab has two tables: **Matches** (all 5 pillars) and **Today's runners**
+  (everything that hit +10% at any point today, even if it faded, with the
+  pillars it fails).
 - **Since flag % / win rate:** each flagged stock remembers its price when it
   was first flagged. The tab shows how many of today's flagged stocks you'd be
   up on if you'd bought at that price and sold now (after 4 PM: at the close).

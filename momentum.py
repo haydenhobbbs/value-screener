@@ -704,6 +704,30 @@ def yahoo_rows(universe: List[str], ts: datetime) -> Tuple[Optional[List[dict]],
 PILLARS = ("price", "change", "volume", "float", "news")
 
 
+def rank_score(float_shares: Optional[float], news_age_hours: Optional[float],
+               pct: float, rvol: Optional[float]) -> int:
+    """0-100 "which one first" score. Experimental: built from one day's replay
+    (2026-10-09), where the smallest floats and freshest news ran hardest. The
+    replay log (Track record on the Momentum tab) is how to check it holds up.
+
+      float      < 2M: 40   < 5M: 30   < 10M: 15   < 20M: 5
+      news age   <= 1h: 30  <= 4h: 20  <= 12h: 10  <= 24h: 5
+      room left  up < 25%: 15   < 50%: 8   (earlier in the move = more room)
+      rel volume >= 20x: 15  >= 10x: 10  >= 5x: 5
+    """
+    score = 0
+    if float_shares is not None:
+        score += next((pts for limit, pts in ((2e6, 40), (5e6, 30), (10e6, 15), (20e6, 5))
+                       if float_shares < limit), 0)
+    if news_age_hours is not None:
+        score += next((pts for limit, pts in ((1, 30), (4, 20), (12, 10), (24, 5))
+                       if news_age_hours <= limit), 0)
+    score += 15 if pct < 25 else 8 if pct < 50 else 0
+    if rvol is not None:
+        score += 15 if rvol >= 20 else 10 if rvol >= 10 else 5 if rvol >= 5 else 0
+    return score
+
+
 def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"],
          track: Optional[set] = None) -> Optional[dict]:
     """Run one scan. Returns a dict with results and metadata, or None if no data came back.
@@ -773,6 +797,9 @@ def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"],
         }
         checked = PILLARS if r["moving"] else PILLARS[:-1]  # news not checked for faded runners
         r["missing"] = [pillar_failure(r, k) for k in checked if not r["pillars"][k]]
+        news_age = ((datetime.now(timezone.utc) - r["news"][2]).total_seconds() / 3600
+                    if r["news"] else None)
+        r["score"] = rank_score(r["float"], news_age, r["pct"], r["rvol"])
         evaluated.append(r)
 
     results = [r for r in evaluated if not r["missing"] and r["moving"]]
@@ -783,8 +810,8 @@ def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"],
         r["status"] = ("On the list" if not r["missing"] else
                        "Near miss: " + r["missing"][0] if r in near_misses else
                        "; ".join(r["missing"]))
-    for table in (results, near_misses):
-        table.sort(key=lambda r: r["pct"], reverse=True)
+    for table in (results, near_misses):  # best rank score first, then biggest gainer
+        table.sort(key=lambda r: (r["score"], r["pct"]), reverse=True)
     runners.sort(key=lambda r: r["high_pct"], reverse=True)
 
     p = [r["pillars"] for r in evaluated]
@@ -877,7 +904,7 @@ def print_report(res: dict) -> None:
         print_extra_tables(res)
         return
 
-    header = f"{'#':>2}  {'Ticker':<6} {'Price':>7} {'Chg%':>7} {'RVol':>6} {'Float':>7}  {'Age':>4}  Headline"
+    header = f"{'#':>2}  {'Ticker':<6} {'Score':>5} {'Price':>7} {'Chg%':>7} {'RVol':>6} {'Float':>7}  {'Age':>4}  Headline"
     print(header)
     for i, r in enumerate(results, 1):
         rvol = f"{r['rvol']:.1f}x" if r["rvol"] is not None else "n/a"
@@ -887,7 +914,7 @@ def print_report(res: dict) -> None:
             age, headline = fmt_age(published), f"{title} ({provider})" if provider else title
         else:
             age, headline = "-", "(no news in window)"
-        line = (f"{i:>2}  {r['ticker']:<6} {r['price']:>7.2f} {r['pct']:>6.1f}% {rvol:>6} "
+        line = (f"{i:>2}  {r['ticker']:<6} {r['score']:>5} {r['price']:>7.2f} {r['pct']:>6.1f}% {rvol:>6} "
                 f"{flt:>7}  {age:>4}  ")
         room = max(width - len(line), 20)
         print(line + (headline if len(headline) <= room else headline[:room - 1] + "…"))

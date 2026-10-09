@@ -27,6 +27,11 @@ jobs:
 
       - run: python track.py
 
+      # Momentum tab's track record: replay today's runners minute by minute and
+      # append to results/replay_log.csv. Never blocks the value-screener update.
+      - run: python replay.py --save
+        continue-on-error: true
+
       - name: Commit updated results
         run: |
           git config user.name "github-actions[bot]"

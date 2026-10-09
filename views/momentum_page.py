@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 import momentum as m
+import replay
 
 # Same idea as the value page: every column gets a hover tooltip.
 COLUMN_HELP = {
@@ -34,6 +35,11 @@ COLUMN_HELP = {
         "Assumes a fill at the flag price, which on fast small caps is optimistic."
     ),
     "Missing": "The one pillar this stock fails.",
+    "Score": (
+        "Experimental 0-100 rank: smaller float, fresher news, earlier in the move and "
+        "higher volume score higher. Built from one day's replay; the Track record "
+        "below shows whether high scores actually do better. Not a buy signal."
+    ),
     "Status": "Whether it's on the list now, and if not, which pillars it fails.",
 }
 
@@ -48,6 +54,8 @@ def col(kind: str, name: str, **kw):
         return st.column_config.NumberColumn(help=help_, format="%.1fx", **kw)
     if kind == "num":
         return st.column_config.NumberColumn(help=help_, format="%.1f", **kw)
+    if kind == "score":
+        return st.column_config.ProgressColumn(help=help_, min_value=0, max_value=100, format="%d", **kw)
     if kind == "check":
         return st.column_config.CheckboxColumn(help=help_, **kw)
     if kind == "link":
@@ -153,7 +161,7 @@ def matches_section(res, flags, since_flag) -> None:
         f = flags.get(r["ticker"]) or {"time": res["ts"], "price": r["price"]}
         rows.append({
             "New": "NEW" if res["ts"] - f["time"] <= timedelta(minutes=5) else "",
-            "Ticker": r["ticker"], "Price": r["price"], "Change %": r["pct"],
+            "Ticker": r["ticker"], "Score": r["score"], "Price": r["price"], "Change %": r["pct"],
             "Rel volume": r["rvol"], "Float (M)": r["float"] / 1e6, "Float est.": r["float_fallback"],
             **news_cols(r),
             "First seen (ET)": f["time"].astimezone(m.ET).strftime("%I:%M:%S %p").lstrip("0"),
@@ -161,6 +169,7 @@ def matches_section(res, flags, since_flag) -> None:
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
         "New": col("text", "New", width="small"), "Ticker": col("text", "Ticker", width="small"),
+        "Score": col("score", "Score", width="small"),
         "Price": col("money", "Price"), "Change %": col("pct", "Change %"),
         "Rel volume": col("x", "Rel volume"), "Float (M)": col("num", "Float (M)"),
         "Float est.": col("check", "Float est.", width="small"),
@@ -198,12 +207,14 @@ def near_miss_section(res) -> None:
         st.info("No near misses right now.")
         return
     rows = [{
-        "Ticker": r["ticker"], "Price": r["price"], "Change %": r["pct"], "Rel volume": r["rvol"],
-        "Float (M)": r["float"] / 1e6 if r["float"] else None, "Missing": r["missing"][0],
+        "Ticker": r["ticker"], "Score": r["score"], "Price": r["price"], "Change %": r["pct"],
+        "Rel volume": r["rvol"], "Float (M)": r["float"] / 1e6 if r["float"] else None,
+        "Missing": r["missing"][0],
         **news_cols(r),
     } for r in res["near_misses"]]
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
-        "Ticker": col("text", "Ticker", width="small"), "Price": col("money", "Price"),
+        "Ticker": col("text", "Ticker", width="small"), "Score": col("score", "Score", width="small"),
+        "Price": col("money", "Price"),
         "Change %": col("pct", "Change %"), "Rel volume": col("x", "Rel volume"),
         "Float (M)": col("num", "Float (M)"), "Missing": col("text", "Missing", width="medium"),
         "News age": col("text", "News age", width="small"),
@@ -242,3 +253,49 @@ def runners_section(res, flags, since_flag) -> None:
 
 
 live_view()
+
+
+st.divider()
+st.markdown("### Track record (replay log)")
+st.caption(
+    "Every weekday after the close, replay.py re-runs the day minute by minute and logs each "
+    "stock the screener would have flagged: what it scored, and what happened if you bought "
+    "at the flag and held to the 4 PM close (long), or shorted it with a "
+    f"{replay.SHORT_STOP_PCT:g}% stop-loss (short). Fills are assumed at the flag price, shares "
+    "are assumed borrowable for shorts, and there are no fees, so real results would be worse. "
+    "A handful of days proves nothing; give it a few weeks. Not investment advice."
+)
+try:
+    log = pd.read_csv(replay.LOG_PATH)
+except FileNotFoundError:
+    log = pd.DataFrame()
+summary = replay.log_summary(log) if not log.empty else {}
+if not summary:
+    st.info("No replay history yet. It fills in automatically after each trading day.")
+else:
+    o = summary["overall"].iloc[0]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Days logged", int(o["Days"]))
+    c2.metric("Stocks flagged", int(o["Trades"]))
+    c3.metric("Long win rate (hold to close)", f"{o['Long win rate']:.0f}%",
+              f"avg {o['Long avg']:+.1f}% per trade", delta_color="off")
+    c4.metric(f"Short win rate ({replay.SHORT_STOP_PCT:g}% stop)", f"{o['Short (stop) win rate']:.0f}%",
+              f"avg {o['Short (stop) avg']:+.1f}% per trade", delta_color="off")
+    stat_cols = {
+        "Trades": st.column_config.NumberColumn(format="%d"),
+        "Long win rate": st.column_config.NumberColumn(format="%.0f%%"),
+        "Long avg": st.column_config.NumberColumn(format="%+.1f%%"),
+        "Short (stop) win rate": st.column_config.NumberColumn(format="%.0f%%"),
+        "Short (stop) avg": st.column_config.NumberColumn(format="%+.1f%%"),
+        "Avg peak after flag": st.column_config.NumberColumn(format="%+.1f%%"),
+    }
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**By rank score:** do high scores beat low ones?")
+        st.dataframe(summary["by_score"], hide_index=True, width="stretch", column_config=stat_cols)
+    with right:
+        st.markdown("**By float**")
+        st.dataframe(summary["by_float"], hide_index=True, width="stretch", column_config=stat_cols)
+    with st.expander("Every logged trade"):
+        st.dataframe(log.sort_values(["date", "flag_time_et"], ascending=[False, True]),
+                     hide_index=True, width="stretch")

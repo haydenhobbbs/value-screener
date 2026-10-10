@@ -128,6 +128,7 @@ DOWNLOAD_THREADS = 8
 MAX_RETRIES = 3                # retries after a rate limit
 RETRY_BACKOFF_SECONDS = 10     # doubles on each retry
 NEWS_CACHE_MINUTES = 10        # reuse news lookups this long between scans
+FLAG_RECHECK_MINUTES = 10      # re-replay runners that haven't qualified yet this often
 
 HERE = Path(__file__).resolve().parent
 CACHE_DIR = HERE / ".cache"
@@ -953,8 +954,11 @@ class BackgroundScanner:
         self.status = "Starting..."
         self.scanning = False
         self.error: Optional[str] = None
-        # (session, ticker) -> {"time": when first flagged, "price": price then}
+        # (session, ticker) -> {"time": first flag, "price": price then, "source": ...}
+        # "replay" = reconstructed from 1-minute bars (true time, whenever the app was
+        # opened); "live" = seen by a live scan, used only until the replay finds it.
         self.first_seen: Dict[Tuple[date, str], dict] = {}
+        self._flag_checked: Dict[Tuple[date, str], float] = {}
         self.last_view = time.time()
 
     def touch(self) -> None:
@@ -1003,9 +1007,10 @@ class BackgroundScanner:
                     session = res["meta"]["session"]
                     with self._lock:
                         for r in res["results"]:
-                            self.first_seen.setdefault((session, r["ticker"]),
-                                                       {"time": res["ts"], "price": r["price"]})
+                            self.first_seen.setdefault((session, r["ticker"]), {
+                                "time": res["ts"], "price": r["price"], "source": "live"})
                         self.latest = res
+                    self._reconstruct_flags(res, float_cache)
             except Exception as e:
                 self.error = f"Scan failed: {e!r}"
             self.scanning = False
@@ -1013,6 +1018,33 @@ class BackgroundScanner:
             self._wake.wait(self.every)
             self._wake.clear()
         self.status = "Paused (no one viewing)"
+
+    def _reconstruct_flags(self, res: dict, float_cache: dict) -> None:
+        """Find the real minute each match/runner first met all five pillars today,
+        by replaying its 1-minute bars, so "First seen" doesn't depend on when the
+        app happened to be open. Found flags never change, so each is looked up once;
+        runners that haven't flagged yet are re-checked every FLAG_RECHECK_MINUTES."""
+        import replay  # replay imports this module, so import lazily
+
+        session = res["meta"]["session"]
+        tickers = dict.fromkeys([r["ticker"] for r in res["results"] + res["runners"]])
+        for t in tickers:
+            key = (session, t)
+            if self.first_seen.get(key, {}).get("source") == "replay":
+                continue
+            checked = self._flag_checked.get(key)
+            if checked and time.time() - checked < FLAG_RECHECK_MINUTES * 60:
+                continue
+            self._flag_checked[key] = time.time()
+            self.status = f"Finding when {t} first qualified today"
+            try:
+                found = (replay.replay_ticker(t, session, float_cache) or {}).get("flag")
+            except Exception:
+                continue
+            if found:
+                with self._lock:
+                    self.first_seen[key] = {"time": found["flag_time"], "price": found["flag_price"],
+                                            "source": "replay"}
 
 
 # --------------------------------- main ---------------------------------

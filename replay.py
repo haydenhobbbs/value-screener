@@ -110,12 +110,12 @@ def prev_close_and_avg(ticker: str, day: date):
     return float(before["Close"].iloc[-1]), float(before["Volume"].tail(m.AVG_VOLUME_DAYS).mean())
 
 
-def replay_ticker(ticker: str, day: date) -> Optional[dict]:
+def replay_ticker(ticker: str, day: date, float_cache: Optional[dict] = None) -> Optional[dict]:
     bars = minute_bars(ticker, day)
     prev_close, avg_vol = prev_close_and_avg(ticker, day)
     if bars.empty or not prev_close or not avg_vol:
         return None
-    flt, flt_fallback = m.fetch_float(ticker, {})
+    flt, flt_fallback = m.fetch_float(ticker, float_cache if float_cache is not None else {})
     news = m.fetch_news_items(ticker)
     if news is None:
         print(f"\n  {ticker}: news lookup failed (Yahoo busy); treating as no news")

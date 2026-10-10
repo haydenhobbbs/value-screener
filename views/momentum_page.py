@@ -26,8 +26,9 @@ COLUMN_HELP = {
     "Headline": "Most recent news headline from the last 24 hours.",
     "Article": "Link to the article.",
     "First seen (ET)": (
-        "Eastern time this stock first passed all five pillars today. Lets you tell a "
-        "fresh mover from one that's been on the list for hours. Resets if the app restarts."
+        "The minute (Eastern) this stock first met all five pillars today, worked out from "
+        "1-minute price data, so it's correct no matter when you opened the app. "
+        "A * means it's still being looked up and shows when this app first saw it."
     ),
     "Flag price": "Price when the screener first flagged it today: the hypothetical entry.",
     "Since flag %": (
@@ -162,7 +163,8 @@ def matches_section(res, flags, since_flag) -> None:
             "Ticker": r["ticker"], "Score": r["score"], "Price": r["price"], "Change %": r["pct"],
             "Rel volume": r["rvol"], "Float (M)": r["float"] / 1e6, "Float est.": r["float_fallback"],
             **news_cols(r),
-            "First seen (ET)": f["time"].astimezone(m.ET).strftime("%I:%M:%S %p").lstrip("0"),
+            "First seen (ET)": f["time"].astimezone(m.ET).strftime("%I:%M %p").lstrip("0")
+                               + ("" if f.get("source") == "replay" else " *"),
             "Flag price": f["price"], "Since flag %": since_flag(r["ticker"]),
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
@@ -190,9 +192,9 @@ def win_rate_section(flags, since_flag, after_close) -> None:
     c3.metric("Average since flag", f"{sum(rets) / len(rets):+.1f}%")
     st.caption(
         "Win rate = flagged stocks you'd be up on if you bought at the flag price "
-        f"and {exit_label}. Counts every stock flagged since the app started today, "
-        "including ones that have since faded off the list. Fills at the flag price are "
-        "optimistic; this is a scorecard, not a strategy."
+        f"and {exit_label}. Counts every stock that met all five pillars at any point "
+        "today (from minute data), including ones that have since faded. Fills at the "
+        "flag price are optimistic; this is a scorecard, not a strategy."
     )
 
 
@@ -213,7 +215,8 @@ def runners_section(res, flags, since_flag) -> None:
             "Ticker": r["ticker"], "Day high %": r["high_pct"], "Change %": r["pct"],
             "Price": r["price"], "Rel volume": r["rvol"],
             "Float (M)": r["float"] / 1e6 if r["float"] else None,
-            "First seen (ET)": f["time"].astimezone(m.ET).strftime("%I:%M %p").lstrip("0") if f else "",
+            "First seen (ET)": (f["time"].astimezone(m.ET).strftime("%I:%M %p").lstrip("0")
+                                + ("" if f.get("source") == "replay" else " *")) if f else "",
             "Flag price": f["price"] if f else None, "Since flag %": since_flag(r["ticker"]),
             "Status": r["status"],
         })

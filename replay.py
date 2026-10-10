@@ -116,6 +116,9 @@ def replay_ticker(ticker: str, day: date, float_cache: Optional[dict] = None) ->
     if bars.empty or not prev_close or not avg_vol:
         return None
     flt, flt_fallback = m.fetch_float(ticker, float_cache if float_cache is not None else {})
+    if flt is None:  # profile lookup blocked (e.g. on Streamlit Cloud): use shares outstanding
+        shares = (m.yahoo_quotes([ticker]).get(ticker) or {}).get("sharesOutstanding")
+        flt, flt_fallback = (float(shares), True) if shares else (None, False)
     news = m.fetch_news_items(ticker)
     if news is None:
         print(f"\n  {ticker}: news lookup failed (Yahoo busy); treating as no news")

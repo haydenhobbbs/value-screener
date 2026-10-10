@@ -338,11 +338,20 @@ def expected_volume_fraction(ts: datetime) -> float:
     return max(frac, MIN_VOLUME_FRACTION)
 
 
+_float_failed: Dict[str, float] = {}
+
+
 def fetch_float(ticker: str, cache: dict) -> Tuple[Optional[float], bool]:
     """(float shares, is_shares_outstanding_fallback)."""
     if ticker in cache:
         return tuple(cache[ticker])
+    # Yahoo's profile endpoint is often blocked from cloud servers; after a failure,
+    # don't retry the same ticker for a while (callers fall back to shares outstanding).
+    if time.time() - _float_failed.get(ticker, 0) < 30 * 60:
+        return None, False
     info = with_retries(lambda: yf.Ticker(ticker).info, f"{ticker} profile") or {}
+    if not info:
+        _float_failed[ticker] = time.time()
     value, fallback = info.get("floatShares"), False
     if not value and USE_SHARES_OUTSTANDING_FALLBACK:
         value = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
@@ -621,6 +630,7 @@ def schwab_rows(universe: List[str], schwab: "Schwab", ts: datetime) -> Tuple[Li
             "regular_price": float(regular_last) if same_day and regular_last else None,
             "volume": float(max(quote.get("totalVolume") or 0, ext.get("totalVolume") or 0)),
             "fallback_avg": (q.get("fundamental") or {}).get("avg10DaysVolume"),
+            "shares_out": (q.get("fundamental") or {}).get("sharesOutstanding"),
             "realtime": q.get("realtime"),
         }
     if not parsed:
@@ -691,6 +701,7 @@ def yahoo_rows(universe: List[str], ts: datetime) -> Tuple[Optional[List[dict]],
             continue
         parsed[t] = {"price": float(price), "prev_close": float(prev_close), "traded": traded_et,
                      "volume": volume, "high": high, "regular_price": regular,
+                     "shares_out": q.get("sharesOutstanding"),
                      "fallback_avg": q.get("averageDailyVolume3Month") or q.get("averageDailyVolume10Day")}
     if not parsed:
         log("No quotes came back from Yahoo (down or rate limiting). Try again shortly.")
@@ -783,6 +794,9 @@ def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"],
         if not (r["moving"] or r["runner"] or r["ticker"] in track):
             continue
         r["float"], r["float_fallback"] = fetch_float(r["ticker"], float_cache)
+        if r["float"] is None and r.get("shares_out"):
+            # Float can't exceed shares outstanding, so this is a safe upper bound.
+            r["float"], r["float_fallback"] = float(r["shares_out"]), True
         # News only matters for stocks that are moving now; skipping faded runners
         # roughly halves the requests to Yahoo.
         news = fetch_latest_news(r["ticker"]) if r["moving"] else None

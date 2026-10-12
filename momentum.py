@@ -1097,7 +1097,14 @@ def main() -> None:
             sys.exit(f"Put SCHWAB_APP_KEY and SCHWAB_APP_SECRET in {SCHWAB_ENV_FILE} first "
                      "(see .env.example).")
     if args.schwab_login:
-        schwab.login()
+        try:
+            schwab.login()
+        except SchwabAuthError as e:
+            if "invalid_grant" in str(e) or "expired" in str(e):
+                sys.exit("\nThat login code expired before it reached Schwab (they only last ~30 "
+                         "seconds). Run --schwab-login again and paste the address right after "
+                         "clicking Done.")
+            sys.exit(f"\nSchwab login failed: {e}")
         return
     if args.schwab_test:
         sym = args.schwab_test.upper().replace("-", "/")

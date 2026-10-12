@@ -206,7 +206,9 @@ of the file.
 - **Data:** live prices/volume come from the Schwab Market Data API when set
   up (real-time, includes premarket volume), otherwise Yahoo. Yahoo has no
   premarket volume, so relative volume shows n/a before 9:30 ET in Yahoo mode.
-  Float and news always come from Yahoo; float can be stale.
+  Float comes from Yahoo and can be stale. News comes from Google News and
+  Yahoo, and only counts real catalysts (company press releases and news about
+  the company); "stock X is soaring" recap articles are filtered out.
 - **Schwab setup** (free with a Schwab account): create an app on
   developer.schwab.com (Market Data Production, callback
   `https://127.0.0.1:8182`), copy `.env.example` to `.env` and fill in the

@@ -24,8 +24,8 @@ Limits:
   * Yahoo keeps 1-minute bars for about 7 days, so older days can't be replayed.
   * Without --tickers, runners are found from today's quotes (day high 10%+ above
     the previous close), which only works for the most recent session.
-  * Float is today's float; news is whatever Yahoo's search returns now (the last
-    ~20 headlines), checked against each minute's timestamp.
+  * Float is today's float. News is Google News searched around that date (plus
+    Yahoo for today), counting only catalysts, checked against each minute's timestamp.
   * Fills are assumed at the 1-minute close. Real fills on fast small caps are
     often worse, so treat these results as optimistic.
 """
@@ -119,7 +119,8 @@ def replay_ticker(ticker: str, day: date, float_cache: Optional[dict] = None) ->
     if flt is None:  # profile lookup blocked (e.g. on Streamlit Cloud): use shares outstanding
         shares = (m.yahoo_quotes([ticker]).get(ticker) or {}).get("sharesOutstanding")
         flt, flt_fallback = (float(shares), True) if shares else (None, False)
-    news = m.fetch_news_items(ticker)
+    # Past days: Google News search limited to that date. Today: the live lookup (adds Yahoo).
+    news = m.fetch_news_items(ticker, None if day == m.now_et().date() else day)
     if news is None:
         print(f"\n  {ticker}: news lookup failed (Yahoo busy); treating as no news")
     news_times = sorted((p[2] for p in news or []), reverse=True)

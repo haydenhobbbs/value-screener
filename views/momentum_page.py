@@ -23,7 +23,11 @@ COLUMN_HELP = {
     "Float (M)": "Shares available to trade, in millions, from Yahoo. Can lag after offerings or reverse splits.",
     "Float est.": "True if Yahoo had no float, so shares outstanding is shown instead (the real float is at most this).",
     "News age": "How long ago the latest headline was published.",
-    "Headline": "Most recent news headline from the last 24 hours.",
+    "Headline": (
+        "Most recent catalyst in the last 24 hours, from Google News and Yahoo: a company "
+        "press release or news about the company. \"Stock X is soaring\" recap articles "
+        "don't count. Labeled Press release or News, plus the source."
+    ),
     "Article": "Link to the article.",
     "First seen (ET)": (
         "The minute (Eastern) this stock first met all five pillars today, worked out from "

@@ -13,7 +13,9 @@ Data sources (no paid keys):
   * Universe: Nasdaq Trader symbol files.
   * Live price/volume: Schwab Market Data API (free with a Schwab account,
     real-time, includes premarket volume) when set up, otherwise Yahoo.
-  * Average volume, float, news: Yahoo Finance via yfinance.
+  * Average volume, float: Yahoo Finance via yfinance.
+  * News: Google News + Yahoo, counting only catalysts (company press releases
+    and real news about the company), not "stock X is soaring" recaps.
 
 Usage (also runs as the "Momentum" tab in app.py):
     python momentum.py                 # one scan
@@ -39,6 +41,7 @@ DATA DELAY - read this:
 from __future__ import annotations
 
 import argparse
+import email.utils
 import io
 import json
 import logging
@@ -55,6 +58,7 @@ import webbrowser
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 warnings.filterwarnings("ignore")
@@ -138,6 +142,7 @@ SCHWAB_TOKEN_FILE = HERE / "schwab_token.json"  # written by --schwab-login
 
 ET = ZoneInfo("America/New_York")
 YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
+GOOGLE_NEWS_URL = "https://news.google.com/rss/search"
 SCHWAB_API = "https://api.schwabapi.com"
 SCHWAB_AUTHORIZE_URL = SCHWAB_API + "/v1/oauth/authorize"
 SCHWAB_TOKEN_URL = SCHWAB_API + "/v1/oauth/token"
@@ -384,17 +389,87 @@ def parse_news_item(item: dict) -> Optional[Tuple[str, str, datetime, str]]:
     return title.strip(), provider, published, link
 
 
-_news_cache: Dict[str, Tuple[float, List[tuple]]] = {}
+# News means a *catalyst*: the company announcing something. Articles written
+# because a stock is already moving ("XYZ stock soars...") are filtered out.
+
+# A headline from one of these is the company's own press release.
+PRESS_WIRES = ("globenewswire", "globe newswire", "pr newswire", "prnewswire", "business wire",
+               "businesswire", "accesswire", "access newswire", "newsfile", "thenewswire",
+               "the newswire", "stocktitan", "stock titan", "eqs news", "cision")
+# Sites that publish "stock X is moving" recaps after the fact. Never a catalyst.
+RECAP_SOURCES = ("stockstotrade", "timothy sykes", "timothysykes", "chartmill", "marketbeat",
+                 "stocktwits", "investorshangout", "quiver", "kalkine", "pluang", "moomoo", "futu",
+                 "富途", "globe and mail")
+RECAP_TITLE = re.compile(
+    r"\b(movers|gainers|losers|watchlist|most active|thin float|low float|beaten down|stocks to watch"
+    r"|trending|shoots? up|stock price|price target|premarket|pre-market)\b|\b(up|down) \d+(\.\d+)?%"
+    r"|\b(surg|soar|jump|spik|plung|tumbl|skyrocket|rocket|explod|collaps|nosediv|whipsaw|volatil)\w*"
+    r"|stocks? (moving|movers|to watch)|top (gainers|losers|movers)|most active|biggest (movers|gainers|losers)"
+    r"|(pre-?market|mid-?day|after[- ]hours|intraday) (movers|gainers|losers|session)"
+    r"|\bwhy (is|are|did)\b.*\b(up|down|higher|lower|soar\w*|jump\w*|surg\w*|spik\w*|moving|trading|fall\w*|ris\w*)\b"
+    r"|\bstocks? (is |are )?(soar|surge|jump|spike|explode|pop|whipsaw|slide|rise|fall|erupt|rall|climb|tumble"
+    r"|sink|plunge|rocket|skyrocket|rip|move|see|volatile|gain|drop)\w*"
+    r"|\bshares (are |is )?(up|down|soar|surge|jump|spike|rise|fall|climb|tumble|plunge|gain|drop|rall)\w*"
+    r"|\bgap(per|pers|s)? (up|down)|unusual (volume|options)|short squeeze|on volume\b",
+    re.I)
+_NAME_SUFFIX = re.compile(
+    r"[,.]?\s+(inc|corp|corporation|co|company|ltd|limited|plc|holdings?|group|n\.?v|s\.?a|ag|se|llc|lp"
+    r"|class [a-c]|ordinary shares|american depositary shares?|ads)\.?$", re.I)
+
+_names: Dict[str, str] = {}
 
 
-def fetch_news_items(ticker: str) -> Optional[List[Tuple[str, str, datetime, str]]]:
-    """Recent headlines about `ticker` (title, provider, published UTC, link), newest first.
-    None means the lookup failed and there's no earlier result to fall back on."""
-    cached = _news_cache.get(ticker)
-    if cached and time.time() - cached[0] < NEWS_CACHE_MINUTES * 60:
-        return cached[1]
+def company_name(ticker: str) -> str:
+    """Short company name for news matching, e.g. 'Veea Inc.' -> 'Veea' (cached)."""
+    if ticker not in _names:
+        q = with_retries(lambda: yahoo_quotes([ticker]).get(ticker), f"{ticker} name") or {}
+        name = (q.get("shortName") or q.get("longName") or "").strip()
+        while True:
+            shorter = _NAME_SUFFIX.sub("", name).strip(" ,.")
+            if shorter == name or len(shorter) < 4:
+                break
+            name = shorter
+        _names[ticker] = name
+    return _names[ticker]
 
-    # Yahoo search is the reliable source; the per-ticker endpoint is often down.
+
+def google_news(ticker: str, name: str, day: Optional[date] = None) -> Optional[list]:
+    """Google News RSS search. With `day`, only articles from around that date
+    (so the replay can check past days). None if the request failed."""
+    query = f'"{name}"' if name else ""
+    if len(ticker) >= 3:
+        query = f'{query} OR "{ticker}"' if query else f'"{ticker}" stock'
+    query += (f" after:{day - timedelta(days=1)} before:{day + timedelta(days=1)}" if day else " when:2d")
+
+    def get():
+        r = requests.get(GOOGLE_NEWS_URL, params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"},
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        r.raise_for_status()
+        return r.content
+
+    content = with_retries(get, f"{ticker} Google News")
+    if content is None:
+        return None
+    items = []
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError:
+        return None
+    for it in root.iter("item"):
+        source = (it.findtext("source") or "").strip()
+        title = (it.findtext("title") or "").strip()
+        if source and title.endswith(f" - {source}"):
+            title = title[: -len(source) - 3]
+        try:
+            published = email.utils.parsedate_to_datetime(it.findtext("pubDate") or "")
+        except (TypeError, ValueError):
+            continue
+        items.append((title, source, published.astimezone(timezone.utc), it.findtext("link") or ""))
+    return items
+
+
+def yahoo_news(ticker: str) -> Optional[list]:
+    """Yahoo search news. None if the request failed."""
     def search_once():
         return with_retries(lambda: yf.Search(ticker, max_results=1, news_count=20,
                                               raise_errors=True), f"{ticker} news search")
@@ -402,31 +477,69 @@ def fetch_news_items(ticker: str) -> Optional[List[Tuple[str, str, datetime, str
     search = search_once()
     if search is not None and not search.news:
         # When busy, Yahoo sometimes answers with zero articles instead of an error.
-        # Retry once; if still empty but we've seen articles before, keep those.
         time.sleep(1)
         search = search_once()
-        if (search is None or not search.news) and cached and cached[1]:
-            return cached[1]
-    if search is not None:
-        items = [n for n in search.news if ticker in (n.get("relatedTickers") or [ticker])]
-    else:
-        items = with_retries(lambda: yf.Ticker(ticker).get_news(count=20), f"{ticker} news") or []
+    if search is None:
+        return None
+    raw = [n for n in search.news if ticker in (n.get("relatedTickers") or [ticker])]
+    return [p for p in map(parse_news_item, raw) if p]
 
-    if search is None and not items:
-        # Lookup failed (usually rate limiting): reuse the last good answer, however
-        # old, rather than reporting "no news". Not cached, so it's retried next scan.
+
+def catalyst_label(item: tuple, ticker: str, name: str) -> Optional[str]:
+    """'Press release' / 'News' if this headline is a real catalyst about the company,
+    None if it's a recap of the move or about something else."""
+    title, provider = item[0], (item[1] or "").lower()
+    if any(s in provider for s in RECAP_SOURCES) or RECAP_TITLE.search(title):
+        return None
+    # The company name, or an exchange-style ticker ("NASDAQ: XYZ", "$XYZ"). A bare
+    # ticker is too ambiguous (WFF also means "World Food Forum").
+    about_it = (name and re.search(rf"\b{re.escape(name)}\b", title, re.I)) or re.search(
+        rf"(NASDAQ|NYSE|AMEX|OTC)[A-Za-z ]*:\s*{re.escape(ticker)}\b|\${re.escape(ticker)}\b", title)
+    if not about_it:
+        return None
+    return "Press release" if any(w in provider for w in PRESS_WIRES) else "News"
+
+
+_news_cache: Dict[Tuple[str, Optional[date]], Tuple[float, List[tuple]]] = {}
+
+
+def fetch_news_items(ticker: str, day: Optional[date] = None) -> Optional[List[Tuple[str, str, datetime, str]]]:
+    """Catalyst headlines about `ticker` from Google News and Yahoo, newest first, as
+    (title, "Press release · GlobeNewswire", published UTC, link). With `day`, headlines
+    from around that date (for the replay). None if every source failed and there's no
+    earlier result to fall back on."""
+    key = (ticker, day)
+    cached = _news_cache.get(key)
+    if cached and (day is not None or time.time() - cached[0] < NEWS_CACHE_MINUTES * 60):
+        return cached[1]
+
+    name = company_name(ticker)
+    sources = [google_news(ticker, name, day)]
+    if day is None:  # Yahoo search only returns recent headlines
+        sources.append(yahoo_news(ticker))
+    if all(s is None for s in sources):
+        # Every source failed (usually rate limiting): reuse the last good answer,
+        # however old, rather than reporting "no news". Retried next scan.
         return cached[1] if cached else None
-    parsed = sorted((p for p in map(parse_news_item, items) if p), key=lambda p: p[2], reverse=True)
-    _news_cache[ticker] = (time.time(), parsed)
-    return parsed
+
+    seen, out = set(), []
+    for item in (i for s in sources if s for i in s):
+        label = catalyst_label(item, ticker, name)
+        norm = re.sub(r"\W+", " ", item[0].lower()).strip()
+        if label and norm not in seen:
+            seen.add(norm)
+            out.append((item[0], f"{label} · {item[1]}" if item[1] else label, item[2], item[3]))
+    out.sort(key=lambda p: p[2], reverse=True)
+    _news_cache[key] = (time.time(), out)
+    return out
 
 
 NEWS_LOOKUP_FAILED = "lookup failed"
 
 
 def fetch_latest_news(ticker: str):
-    """Newest headline about `ticker` within NEWS_MAX_AGE_HOURS; None if there isn't one;
-    NEWS_LOOKUP_FAILED if Yahoo couldn't be reached."""
+    """Newest catalyst headline about `ticker` within NEWS_MAX_AGE_HOURS; None if there
+    isn't one; NEWS_LOOKUP_FAILED if no news source could be reached."""
     items = fetch_news_items(ticker)
     if items is None:
         return NEWS_LOOKUP_FAILED
@@ -856,8 +969,8 @@ def pillar_failure(r: dict, pillar: str) -> str:
         return ("Float unknown" if r["float"] is None
                 else f"Float {r['float'] / 1e6:.1f}M (over {MAX_FLOAT / 1e6:g}M)")
     if r.get("news_failed"):
-        return "News lookup failed (Yahoo busy)"
-    return "No news on Yahoo in 24h"
+        return "News lookup failed (sources busy)"
+    return "No catalyst news in 24h"
 
 
 def run_scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"]) -> None:

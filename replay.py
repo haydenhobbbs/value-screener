@@ -50,7 +50,14 @@ VARIANTS = {"flag": "5 pillars", "flag_no_news": "4 pillars (no news)"}
 
 def find_runners(session: Optional[date]) -> List[str]:
     """Stocks whose day high was MIN_PCT_CHANGE%+ above the previous close (latest session)."""
-    quotes = m.yahoo_quotes(m.load_universe())
+    universe = m.load_universe()
+    quotes = m.yahoo_quotes(universe)
+    if len(quotes) < len(universe) * 0.5:
+        # Yahoo's quote endpoint is sometimes blocked (e.g. on GitHub's servers):
+        # fall back to daily bars, which is slower but uses a different endpoint.
+        print(f"Only {len(quotes)}/{len(universe)} quotes came back; finding runners from daily bars instead.")
+        daily = m.download_batched(universe, "daily bars", period="3mo", interval="1d")
+        return find_runners_from_daily(daily, session or m.now_et().date())
     out = []
     for t, q in quotes.items():
         pc, hi = q.get("regularMarketPreviousClose"), q.get("regularMarketDayHigh")
@@ -236,10 +243,16 @@ def log_rows(results: List[dict], day: date) -> pd.DataFrame:
 
 
 def save_log(new: pd.DataFrame, day: date) -> None:
-    """Append one day's replay to results/replay_log.csv (re-running a day replaces it)."""
+    """Merge one day's replay into results/replay_log.csv. New rows replace the same
+    (date, ticker, variant); other rows for that day are kept, and an empty result
+    never wipes a day (a run where Yahoo blocked the data looks empty)."""
+    if new.empty:
+        print(f"\nNothing flagged for {day}; replay log left unchanged.")
+        return
     old = pd.read_csv(LOG_PATH) if LOG_PATH.exists() else pd.DataFrame()
     if not old.empty:
-        old = old[old["date"] != day.isoformat()]
+        replaced = set(zip(new["date"], new["ticker"], new["variant"]))
+        old = old[[k not in replaced for k in zip(old["date"], old["ticker"], old["variant"])]]
     out = pd.concat([old, new], ignore_index=True).sort_values(["date", "variant", "flag_time_et"])
     LOG_PATH.parent.mkdir(exist_ok=True)
     out.to_csv(LOG_PATH, index=False)
@@ -346,6 +359,7 @@ def main() -> None:
             raise SystemExit("For a past date, pass --tickers (runners are only auto-found for today).")
         print("Finding today's runners...")
         tickers = find_runners(None)
+        print(f"Found {len(tickers)} runners.")
     if day is None:
         last = minute_bars("SPY", m.now_et().date())
         day = m.now_et().date() if not last.empty else None

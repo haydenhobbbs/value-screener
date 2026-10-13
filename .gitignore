@@ -9,3 +9,4 @@ venv/
 .env
 schwab_token.json
 .cache/
+study/

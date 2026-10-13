@@ -75,7 +75,10 @@ MIN_PCT_CHANGE = 10.0          # % up vs. previous close
 MIN_REL_VOLUME = 5.0           # today's volume vs. average, adjusted for time of day
 MAX_FLOAT = 20_000_000         # shares
 NEWS_MAX_AGE_HOURS = 24
-REQUIRE_NEWS = True            # False = still show stocks with no fresh headline
+# The news catalyst is shown either way; this decides whether it's *required*.
+# Off by default: over 2026-09-14..10-12, 5 of the 10 biggest runners after a
+# flag had no catalyst. The app has a toggle for the strict 5-pillar version.
+REQUIRE_NEWS = False
 
 # --- Extra tables ---
 # "Today's runners": stocks that hit MIN_PCT_CHANGE at any point today, even if
@@ -410,7 +413,8 @@ RECAP_TITLE = re.compile(
     r"|\bstocks? (is |are )?(soar|surge|jump|spike|explode|pop|whipsaw|slide|rise|fall|erupt|rall|climb|tumble"
     r"|sink|plunge|rocket|skyrocket|rip|move|see|volatile|gain|drop)\w*"
     r"|\bshares (are |is )?(up|down|soar|surge|jump|spike|rise|fall|climb|tumble|plunge|gain|drop|rall)\w*"
-    r"|\bgap(per|pers|s)? (up|down)|unusual (volume|options)|short squeeze|on volume\b",
+    r"|\bgap(per|pers|s)? (up|down)|unusual (volume|options)|short squeeze|on volume\b"
+    r"|\bnews\s*[—–-]\s*(nasdaq|nyse|amex|otc)\b|\btrades at \$|\bstock (price|quote)\b",
     re.I)
 _NAME_SUFFIX = re.compile(
     r"[,.]?\s+(inc|corp|corporation|co|company|ltd|limited|plc|holdings?|group|n\.?v|s\.?a|ag|se|llc|lp"
@@ -921,7 +925,7 @@ def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"],
             "change": r["pct"] >= MIN_PCT_CHANGE,
             "volume": rvol_unknown_ok or (r["rvol"] is not None and r["rvol"] >= MIN_REL_VOLUME),
             "float": r["float"] is not None and r["float"] < MAX_FLOAT,
-            "news": r["news"] is not None or not REQUIRE_NEWS,
+            "news": r["news"] is not None,
         }
         checked = PILLARS if r["moving"] else PILLARS[:-1]  # news not checked for faded runners
         r["missing"] = [pillar_failure(r, k) for k in checked if not r["pillars"][k]]
@@ -930,15 +934,18 @@ def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"],
         r["score"] = rank_score(r["float"], news_age, r["pct"], r["rvol"])
         evaluated.append(r)
 
-    results = [r for r in evaluated if not r["missing"] and r["moving"]]
+    all_but_news = lambda r: all(r["pillars"][k] for k in PILLARS[:-1])  # noqa: E731
+    results_5 = [r for r in evaluated if r["moving"] and not r["missing"]]
+    results_4 = [r for r in evaluated if r["moving"] and all_but_news(r)]
+    results = results_5 if REQUIRE_NEWS else results_4
     near_misses = [r for r in evaluated if len(r["missing"]) == 1
                    and r["pillars"]["price"] and r["pillars"]["change"]]
     runners = [r for r in evaluated if r["runner"] or r["ticker"] in track]
     for r in runners:
         r["status"] = ("On the list" if not r["missing"] else
-                       "Near miss: " + r["missing"][0] if r in near_misses else
+                       "On the list without news (no catalyst)" if r["moving"] and all_but_news(r) else
                        "; ".join(r["missing"]))
-    for table in (results, near_misses):  # best rank score first, then biggest gainer
+    for table in (results_5, results_4, near_misses):  # best rank score first, then biggest gainer
         table.sort(key=lambda r: (r["score"], r["pct"]), reverse=True)
     runners.sort(key=lambda r: r["high_pct"], reverse=True)
 
@@ -948,12 +955,13 @@ def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"],
 
     save_float_cache(float_cache)
     days = schwab.login_days_left() if schwab else None
-    return {"results": results, "near_misses": near_misses, "runners": runners,
+    return {"results": results, "results_5": results_5, "results_4": results_4,
+            "near_misses": near_misses, "runners": runners,
             "prices": {r["ticker"]: {"price": r["price"], "regular_price": r.get("regular_price")}
                        for r in evaluated},
             "ts": ts, "meta": meta, "live": live, "premarket": premarket,
             "elapsed": time.time() - started, "schwab_days_left": days,
-            "funnel": [len(universe), meta["considered"], stage1, stage2, len(results)]}
+            "funnel": [len(universe), meta["considered"], stage1, stage2, len(results_5)]}
 
 
 def pillar_failure(r: dict, pillar: str) -> str:
@@ -990,21 +998,22 @@ def fmt_age(published: datetime) -> str:
     return f"{mins}m" if mins < 60 else f"{mins // 60}h"
 
 
-def report_header(res: dict) -> List[str]:
+def report_header(res: dict, tz: ZoneInfo = ET, tz_label: str = "ET") -> List[str]:
     """Plain-English lines describing a scan: phase, source, data delay, warnings, funnel."""
     ts, meta, live, premarket = res["ts"], res["meta"], res["live"], res["premarket"]
+    ts, meta = ts.astimezone(tz), dict(meta, newest=meta["newest"].astimezone(tz))
     session, newest, source = meta["session"], meta["newest"], meta["source"]
     lag_min = max(0.0, (ts - newest).total_seconds() / 60)
     phase = "PREMARKET" if premarket else ("LIVE" if live else f"LAST SESSION ({session})")
-    lines = [f"Momentum scan  {ts:%Y-%m-%d %H:%M:%S} ET  [{phase}]  source: {source}"]
+    lines =[f"Momentum scan  {ts:%Y-%m-%d %I:%M:%S %p} {tz_label}  [{phase}]  source: {source}"]
     if live:
-        lines.append(f"Data delay: newest {source} trade is from {newest:%H:%M:%S} ET, "
+        lines.append(f"Data delay: newest {source} trade is from {newest:%I:%M:%S %p} {tz_label}, "
                      f"{lag_min:.1f} min before the scan started. The scan took {res['elapsed']:.0f}s, "
                      f"so the oldest prices are about {lag_min + res['elapsed'] / 60:.1f} min old. "
                      f"({meta['note']})")
     else:
         lines.append(f"Market is not trading for {ts:%Y-%m-%d} yet; showing the {session} session "
-                     f"(last data {newest:%H:%M} ET).")
+                     f"(last data {newest:%I:%M %p} {tz_label}).")
     if premarket and source == "Yahoo":
         lines.append("Premarket: Yahoo reports no premarket volume, so RVOL shows n/a and is "
                      + ("NOT filtered." if PASS_UNKNOWN_RVOL_PREMARKET else "filtered out."))
@@ -1072,7 +1081,7 @@ class BackgroundScanner:
     on the next touch(), so it doesn't hammer Yahoo when nobody is looking.
     """
 
-    def __init__(self, every: int = LOOP_SECONDS, idle_stop: int = 300):
+    def __init__(self, every: int = LOOP_SECONDS, idle_stop: int = 30 * 60):
         self.every, self.idle_stop = every, idle_stop
         self._lock = threading.Lock()
         self._wake = threading.Event()
@@ -1084,7 +1093,9 @@ class BackgroundScanner:
         # (session, ticker) -> {"time": first flag, "price": price then, "source": ...}
         # "replay" = reconstructed from 1-minute bars (true time, whenever the app was
         # opened); "live" = seen by a live scan, used only until the replay finds it.
-        self.first_seen: Dict[Tuple[date, str], dict] = {}
+        self.first_seen: Dict[Tuple[date, str], dict] = {}      # all five pillars
+        self.first_seen_4: Dict[Tuple[date, str], dict] = {}    # four pillars (news not required)
+        self.last_scan_done: Optional[float] = None
         self._flag_checked: Dict[Tuple[date, str], float] = {}
         self.last_view = time.time()
 
@@ -1101,7 +1112,9 @@ class BackgroundScanner:
     def snapshot(self) -> dict:
         with self._lock:
             return {"latest": self.latest, "status": self.status, "scanning": self.scanning,
-                    "error": self.error, "first_seen": dict(self.first_seen)}
+                    "error": self.error, "first_seen": dict(self.first_seen),
+                    "first_seen_4": dict(self.first_seen_4), "last_scan_done": self.last_scan_done,
+                    "every": self.every}
 
     def _set_status(self, msg: str) -> None:
         if msg:
@@ -1126,17 +1139,21 @@ class BackgroundScanner:
                     return
             try:
                 last_session = self.latest["meta"]["session"] if self.latest else now_et().date()
-                track = {t for (sess, t) in self.first_seen if sess == last_session}
+                track = {t for (sess, t) in list(self.first_seen) + list(self.first_seen_4)
+                         if sess == last_session}
                 res = scan(universe, float_cache, schwab, track)
                 if res is None:
                     self.error = "No price data came back (Yahoo down or rate limiting). Retrying."
                 else:
                     session = res["meta"]["session"]
                     with self._lock:
-                        for r in res["results"]:
-                            self.first_seen.setdefault((session, r["ticker"]), {
-                                "time": res["ts"], "price": r["price"], "source": "live"})
+                        for flags, rows in ((self.first_seen, res["results_5"]),
+                                            (self.first_seen_4, res["results_4"])):
+                            for r in rows:
+                                flags.setdefault((session, r["ticker"]), {
+                                    "time": res["ts"], "price": r["price"], "source": "live"})
                         self.latest = res
+                        self.last_scan_done = time.time()
                     self._reconstruct_flags(res, float_cache)
             except Exception as e:
                 self.error = f"Scan failed: {e!r}"
@@ -1154,10 +1171,10 @@ class BackgroundScanner:
         import replay  # replay imports this module, so import lazily
 
         session = res["meta"]["session"]
-        tickers = dict.fromkeys([r["ticker"] for r in res["results"] + res["runners"]])
+        tickers = dict.fromkeys([r["ticker"] for r in res["results_4"] + res["runners"]])
         for t in tickers:
             key = (session, t)
-            if self.first_seen.get(key, {}).get("source") == "replay":
+            if all(f.get(key, {}).get("source") == "replay" for f in (self.first_seen, self.first_seen_4)):
                 continue
             checked = self._flag_checked.get(key)
             if checked and time.time() - checked < FLAG_RECHECK_MINUTES * 60:
@@ -1165,13 +1182,15 @@ class BackgroundScanner:
             self._flag_checked[key] = time.time()
             self.status = f"Finding when {t} first qualified today"
             try:
-                found = (replay.replay_ticker(t, session, float_cache) or {}).get("flag")
+                r = replay.replay_ticker(t, session, float_cache) or {}
             except Exception:
                 continue
-            if found:
-                with self._lock:
-                    self.first_seen[key] = {"time": found["flag_time"], "price": found["flag_price"],
-                                            "source": "replay"}
+            with self._lock:
+                for flags, found in ((self.first_seen, r.get("flag")),
+                                     (self.first_seen_4, r.get("flag_no_news"))):
+                    if found:
+                        flags[key] = {"time": found["flag_time"], "price": found["flag_price"],
+                                      "source": "replay"}
 
 
 # --------------------------------- main ---------------------------------

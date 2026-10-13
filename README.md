@@ -186,13 +186,17 @@ earnings history) - always read why a pick is cheap before acting on it.
 `momentum.py` scans every US-listed stock (Nasdaq Trader symbol files) for
 Ross Cameron's 5 pillars: price $2–$20, up 10%+ on the day, 5x relative
 volume (adjusted for time of day), float under 20M shares, and a news
-headline in the last 24 hours. Thresholds are in the CONFIG block at the top
+catalyst in the last 24 hours. Thresholds are in the CONFIG block at the top
 of the file.
 
-- In the app, it rescans in the background every 60s while the tab is open
-  and pauses after 5 minutes with nobody viewing.
+- **News is shown but not required by default** (a "Require news catalyst"
+  switch on the tab turns on the strict 5-pillar version). In the first month
+  of replays, 5 of the 10 biggest runners after a flag had no catalyst.
+- In the app, it rescans in the background every 60s and keeps going for 30
+  minutes after the Momentum tab was last open. A status line at the top says
+  whether it's running. Times can be shown in Pacific or Eastern.
 - From a terminal: `python momentum.py` (one scan) or `python momentum.py --loop`.
-- The tab has two tables: **Matches** (all 5 pillars) and **Today's runners**
+- The tab has two tables: **Matches** and **Today's runners**
   (everything that hit +10% at any point today, even if it faded, with the
   pillars it fails).
 - **Since flag % / win rate:** each flagged stock remembers its price when it

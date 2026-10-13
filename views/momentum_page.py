@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import time
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -29,10 +31,10 @@ COLUMN_HELP = {
         "don't count. Labeled Press release or News, plus the source."
     ),
     "Article": "Link to the article.",
-    "First seen (ET)": (
-        "The minute (Eastern) this stock first met all five pillars today, worked out from "
-        "1-minute price data, so it's correct no matter when you opened the app. "
-        "A * means it's still being looked up and shows when this app first saw it."
+    "First seen": (
+        "The minute this stock first made the list today (in the time zone picked above), "
+        "worked out from 1-minute price data, so it's correct no matter when you opened "
+        "the app. A * means it's still being looked up and shows when this app first saw it."
     ),
     "Flag price": "Price when the screener first flagged it today: the hypothetical entry.",
     "Since flag %": (
@@ -71,7 +73,7 @@ def news_cols(r: dict) -> dict:
     title, provider, published, link = r["news"] if r["news"] else (None, "", None, "")
     return {
         "News age": m.fmt_age(published) if published else "",
-        "Headline": f"{title} ({provider})" if title and provider else (title or ""),
+        "Headline": (f"{title} ({provider})" if title and provider else title) or "No catalyst",
         "Article": link or None,
     }
 
@@ -87,17 +89,46 @@ scanner = get_scanner()
 
 st.title("Momentum Screener")
 st.caption(
-    f"Ross Cameron's (Warrior Trading) 5 pillars: price \\${m.MIN_PRICE:g}–\\${m.MAX_PRICE:g}, "
+    f"Ross Cameron's (Warrior Trading) pillars: price \\${m.MIN_PRICE:g}–\\${m.MAX_PRICE:g}, "
     f"up at least {m.MIN_PCT_CHANGE:g}% on the day, {m.MIN_REL_VOLUME:g}x relative volume, "
-    f"float under {m.MAX_FLOAT / 1e6:g}M shares, and a news headline in the last "
-    f"{m.NEWS_MAX_AGE_HOURS}h. Scans every US-listed stock every {m.LOOP_SECONDS}s while this "
-    "page is open. Thresholds live in the CONFIG section of momentum.py. Not investment advice."
+    f"float under {m.MAX_FLOAT / 1e6:g}M shares, and (optionally) a news catalyst in the last "
+    f"{m.NEWS_MAX_AGE_HOURS}h. Scans every US-listed stock every {m.LOOP_SECONDS}s, and keeps "
+    "going for 30 minutes after you leave this tab. Thresholds live in the CONFIG section of "
+    "momentum.py. Not investment advice."
 )
 
-col1, col2, _ = st.columns([1, 1, 4])
-auto = col1.toggle("Auto-refresh", value=True, help="Update this page every 5 seconds.")
-if col2.button("Scan now", help="Start the next scan immediately instead of waiting."):
+c1, c2, c3, c4 = st.columns([1.1, 1.6, 1.4, 1])
+auto = c1.toggle("Auto-refresh", value=True, help="Update this page every 5 seconds.")
+REQUIRE_NEWS = c2.toggle(
+    "Require news catalyst", value=m.REQUIRE_NEWS,
+    help="On: Ross's strict 5 pillars, a stock needs a catalyst in the last 24h. Off: the "
+         "other 4 pillars are enough and the catalyst (or 'No catalyst') is shown. Over the "
+         "first month of replays, half of the 10 biggest runners had no catalyst.")
+zone = c3.radio("Times in", ["Pacific", "Eastern"], horizontal=True,
+                help="Time zone for every time on this page.")
+if c4.button("Scan now", help="Start the next scan immediately instead of waiting."):
     scanner.scan_now()
+TZ, TZ_LABEL = (ZoneInfo("America/Los_Angeles"), "PT") if zone == "Pacific" else (m.ET, "ET")
+
+
+def clock(ts, seconds: bool = False) -> str:
+    return ts.astimezone(TZ).strftime("%I:%M:%S %p" if seconds else "%I:%M %p").lstrip("0")
+
+
+def status_line(snap: dict) -> None:
+    """Make it obvious whether the scanner is actually running."""
+    done, every = snap["last_scan_done"], snap["every"]
+    if snap["scanning"]:
+        st.success(f"Scanner running: {snap['status']}", icon=":material/radar:")
+    elif done and time.time() - done < every + 120:
+        ago = time.time() - done
+        nxt = max(0, every - ago)
+        last = clock(snap["latest"]["ts"], seconds=True) if snap["latest"] else "?"
+        st.success(f"Scanner running: last scan {last} {TZ_LABEL} ({ago:.0f}s ago), "
+                   f"next in ~{nxt:.0f}s", icon=":material/radar:")
+    else:
+        st.warning("Scanner paused. It stops 30 minutes after this tab was last open and "
+                   "restarts when you open it (it's restarting now).", icon=":material/pause_circle:")
 
 
 @st.fragment(run_every=5 if auto else None)
@@ -106,12 +137,9 @@ def live_view() -> None:
     snap = scanner.snapshot()
     res = snap["latest"]
 
+    status_line(snap)
     if snap["error"]:
         st.warning(snap["error"])
-    if snap["scanning"]:
-        st.info(f"Scanning... {snap['status']}", icon=":material/progress_activity:")
-    else:
-        st.caption(snap["status"])
 
     if res is None:
         st.write("Waiting for the first scan. It usually takes under a minute.")
@@ -120,12 +148,12 @@ def live_view() -> None:
     # Never let old results pass for current ones.
     age_min = (m.now_et() - res["ts"]).total_seconds() / 60
     if age_min > max(5, 3 * m.LOOP_SECONDS / 60):
-        when = res["ts"].strftime("%a %b %d, %I:%M %p ET")
+        when = res["ts"].astimezone(TZ).strftime(f"%a %b %d, %I:%M %p {TZ_LABEL}")
         st.warning(f"These results are from {when} ({age_min:.0f} min ago). "
                    + ("A new scan is running." if snap["scanning"] else "Click Scan now to refresh."),
                    icon=":material/schedule:")
 
-    header = m.report_header(res)
+    header = m.report_header(res, TZ, TZ_LABEL)
     st.subheader(header[0])
     for line in header[1:-1]:
         st.caption(line)
@@ -135,12 +163,13 @@ def live_view() -> None:
     c1.metric("Stocks scanned", f"{total:,}")
     c2.metric("Price, % up and volume", stage1)
     c3.metric("…and float", stage2)
-    c4.metric("…and news (matches)", final)
+    c4.metric("…and news catalyst", final)
 
     session = res["meta"]["session"]
-    flags = {t: v for (sess, t), v in snap["first_seen"].items() if sess == session}
-    # After the 4 PM close, "held to close" means the regular-session close, not after-hours.
-    after_close = not res["live"] or res["ts"].hour >= 16
+    first_seen = snap["first_seen"] if REQUIRE_NEWS else snap["first_seen_4"]
+    flags = {t: v for (sess, t), v in first_seen.items() if sess == session}
+    # After the 4 PM ET close, "held to close" means the regular-session close, not after-hours.
+    after_close = not res["live"] or res["ts"].astimezone(m.ET).hour >= 16
 
     def since_flag(ticker: str):
         f, px = flags.get(ticker), res["prices"].get(ticker)
@@ -155,20 +184,21 @@ def live_view() -> None:
 
 
 def matches_section(res, flags, since_flag) -> None:
-    st.markdown("### Matches: all 5 pillars")
-    if not res["results"]:
-        st.info("No stocks match all five pillars right now.")
+    results = res["results_5"] if REQUIRE_NEWS else res["results_4"]
+    st.markdown("### Matches: all 5 pillars" if REQUIRE_NEWS
+                else "### Matches: 4 pillars (news shown, not required)")
+    if not results:
+        st.info("No stocks match right now.")
         return
     rows = []
-    for r in res["results"]:
+    for r in results:
         f = flags.get(r["ticker"]) or {"time": res["ts"], "price": r["price"]}
         rows.append({
             "New": "NEW" if res["ts"] - f["time"] <= timedelta(minutes=5) else "",
             "Ticker": r["ticker"], "Score": r["score"], "Price": r["price"], "Change %": r["pct"],
             "Rel volume": r["rvol"], "Float (M)": r["float"] / 1e6, "Float est.": r["float_fallback"],
             **news_cols(r),
-            "First seen (ET)": f["time"].astimezone(m.ET).strftime("%I:%M %p").lstrip("0")
-                               + ("" if f.get("source") == "replay" else " *"),
+            "First seen": clock(f["time"]) + ("" if f.get("source") == "replay" else " *"),
             "Flag price": f["price"], "Since flag %": since_flag(r["ticker"]),
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
@@ -179,7 +209,7 @@ def matches_section(res, flags, since_flag) -> None:
         "Float est.": col("check", "Float est.", width="small"),
         "News age": col("text", "News age", width="small"),
         "Headline": col("text", "Headline", width="large"), "Article": col("link", "Article"),
-        "First seen (ET)": col("text", "First seen (ET)"), "Flag price": col("money", "Flag price"),
+        "First seen": col("text", "First seen"), "Flag price": col("money", "Flag price"),
         "Since flag %": col("pct", "Since flag %"),
     })
 
@@ -196,7 +226,7 @@ def win_rate_section(flags, since_flag, after_close) -> None:
     c3.metric("Average since flag", f"{sum(rets) / len(rets):+.1f}%")
     st.caption(
         "Win rate = flagged stocks you'd be up on if you bought at the flag price "
-        f"and {exit_label}. Counts every stock that met all five pillars at any point "
+        f"and {exit_label}. Counts every stock that made the list at any point "
         "today (from minute data), including ones that have since faded. Fills at the "
         "flag price are optimistic; this is a scorecard, not a strategy."
     )
@@ -219,8 +249,8 @@ def runners_section(res, flags, since_flag) -> None:
             "Ticker": r["ticker"], "Day high %": r["high_pct"], "Change %": r["pct"],
             "Price": r["price"], "Rel volume": r["rvol"],
             "Float (M)": r["float"] / 1e6 if r["float"] else None,
-            "First seen (ET)": (f["time"].astimezone(m.ET).strftime("%I:%M %p").lstrip("0")
-                                + ("" if f.get("source") == "replay" else " *")) if f else "",
+            "First seen": (clock(f["time"]) + ("" if f.get("source") == "replay" else " *"))
+                          if f else "",
             "Flag price": f["price"] if f else None, "Since flag %": since_flag(r["ticker"]),
             "Status": r["status"],
         })
@@ -228,7 +258,7 @@ def runners_section(res, flags, since_flag) -> None:
         "Ticker": col("text", "Ticker", width="small"), "Day high %": col("pct", "Day high %"),
         "Change %": col("pct", "Change %"), "Price": col("money", "Price"),
         "Rel volume": col("x", "Rel volume"), "Float (M)": col("num", "Float (M)"),
-        "First seen (ET)": col("text", "First seen (ET)"), "Flag price": col("money", "Flag price"),
+        "First seen": col("text", "First seen"), "Flag price": col("money", "Flag price"),
         "Since flag %": col("pct", "Since flag %"), "Status": col("text", "Status", width="large"),
     })
 
@@ -250,7 +280,9 @@ try:
     log = pd.read_csv(replay.LOG_PATH)
 except FileNotFoundError:
     log = pd.DataFrame()
-summary = replay.log_summary(log) if not log.empty else {}
+variant = "5 pillars" if REQUIRE_NEWS else "4 pillars (no news)"
+st.caption(f"Showing: **{variant}**, following the news switch at the top.")
+summary = replay.log_summary(log, variant) if not log.empty else {}
 if not summary:
     st.info("No replay history yet. It fills in automatically after each trading day.")
 else:

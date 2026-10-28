@@ -607,14 +607,16 @@ class Schwab:
     def login(self) -> None:
         url = (f"{SCHWAB_AUTHORIZE_URL}?client_id={self.app_key}"
                f"&redirect_uri={urllib.parse.quote(self.callback, safe='')}")
-        print("1. A Schwab login page will open (or copy this link into your browser):")
+        print("1. A Schwab login page is opening (or copy this link into your browser):")
         print(f"   {url}")
-        print("2. Log in with your normal Schwab brokerage login and approve access.")
+        print("2. Log in with your normal Schwab brokerage login, approve, and click Done.")
         print("3. You'll land on a page that won't load (that's expected).")
-        print("   Copy the FULL address from the address bar and paste it below quickly;")
-        print("   the code in it expires in about 30 seconds.")
+        print("   Just COPY its address: press Cmd+L, then Cmd+C, in the browser.")
+        print("   This window picks it up from your clipboard automatically.")
+        print("   (Pasting it here and pressing Enter also works.)")
+        print("\nWaiting for the Schwab address...", flush=True)
         webbrowser.open(url)
-        received = input("\nPaste the address here: ").strip()
+        received = self._wait_for_redirect()
         code = urllib.parse.parse_qs(urllib.parse.urlparse(received).query).get("code", [None])[0]
         if not code:
             raise SchwabAuthError("no ?code= found in that address; run --schwab-login again")
@@ -625,6 +627,40 @@ class Schwab:
                           "access_expires_at": now + int(tok.get("expires_in", 1800)),
                           "refresh_issued_at": now})
         print(f"Logged in. You'll need to log in again in {SCHWAB_REFRESH_TOKEN_DAYS} days.")
+
+    def _wait_for_redirect(self, timeout: float = 600) -> str:
+        """Return the redirected Schwab address as soon as it shows up on the clipboard
+        (macOS) or is pasted into this window, whichever comes first."""
+        import select
+        import subprocess
+
+        def clipboard() -> str:
+            try:
+                return subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=2).stdout.strip()
+            except Exception:
+                return ""
+
+        def is_redirect(text: str) -> bool:
+            return text.startswith(self.callback) and "code=" in text
+
+        before = clipboard()  # ignore anything already on the clipboard from an old attempt
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            clip = clipboard()
+            if clip != before and is_redirect(clip):
+                print("Got it from the clipboard.")
+                return clip
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+            except (OSError, ValueError):  # stdin not selectable: fall back to typing/pasting
+                return input("Paste the address here: ").strip()
+            if ready:
+                line = sys.stdin.readline().strip()
+                if is_redirect(line):
+                    return line
+                if line:
+                    print("That doesn't look like the Schwab address; still waiting...")
+        raise SchwabAuthError("timed out waiting for the Schwab address; run --schwab-login again")
 
     def _refresh(self) -> dict:
         token = self._load_token()

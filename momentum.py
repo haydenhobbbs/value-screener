@@ -941,30 +941,34 @@ def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"],
         r["rvol"] = r["volume"] / (avg * frac) if r["volume"] > 0 and avg else None
         r["runner"] = r["ran"] and (r["rvol"] is None or r["rvol"] >= RUNNER_MIN_REL_VOLUME)
 
-    # Float and news only for stocks that could appear in one of the tables.
+    # Cheap pillars first; float and news only for stocks still in the running.
+    # On a broad rally day 150+ stocks can be up 10%, and most fail on volume, so
+    # looking up float and news for all of them made scans take minutes.
     evaluated = []
     for r in cands:
         if not (r["moving"] or r["runner"] or r["ticker"] in track):
             continue
-        r["float"], r["float_fallback"] = fetch_float(r["ticker"], float_cache)
-        if r["float"] is None and r.get("shares_out"):
-            # Float can't exceed shares outstanding, so this is a safe upper bound.
-            r["float"], r["float_fallback"] = float(r["shares_out"]), True
-        # News only matters for stocks that are moving now; skipping faded runners
-        # roughly halves the requests to Yahoo.
-        news = fetch_latest_news(r["ticker"]) if r["moving"] else None
-        r["news_failed"] = news == NEWS_LOOKUP_FAILED
-        r["news"] = None if r["news_failed"] else news
         rvol_unknown_ok = r["rvol"] is None and premarket and PASS_UNKNOWN_RVOL_PREMARKET
-        r["pillars"] = {
-            "price": MIN_PRICE <= r["price"] <= MAX_PRICE,
-            "change": r["pct"] >= MIN_PCT_CHANGE,
-            "volume": rvol_unknown_ok or (r["rvol"] is not None and r["rvol"] >= MIN_REL_VOLUME),
-            "float": r["float"] is not None and r["float"] < MAX_FLOAT,
-            "news": r["news"] is not None,
-        }
-        checked = PILLARS if r["moving"] else PILLARS[:-1]  # news not checked for faded runners
-        r["missing"] = [pillar_failure(r, k) for k in checked if not r["pillars"][k]]
+        # None = not checked (not needed to decide anything), never shown as a failure.
+        r["pillars"] = dict.fromkeys(PILLARS)
+        r["pillars"].update(
+            price=MIN_PRICE <= r["price"] <= MAX_PRICE,
+            change=r["pct"] >= MIN_PCT_CHANGE,
+            volume=rvol_unknown_ok or (r["rvol"] is not None and r["rvol"] >= MIN_REL_VOLUME))
+        r["float"], r["float_fallback"] = (float(r["shares_out"]), True) if r.get("shares_out") else (None, False)
+        r["news"], r["news_failed"] = None, False
+        if r["moving"] and r["pillars"]["volume"]:
+            flt, fallback = fetch_float(r["ticker"], float_cache)
+            if flt is not None:
+                r["float"], r["float_fallback"] = flt, fallback
+            # Float can't exceed shares outstanding, so that's a safe stand-in when the lookup fails.
+            r["pillars"]["float"] = r["float"] is not None and r["float"] < MAX_FLOAT
+            if r["pillars"]["float"]:
+                news = fetch_latest_news(r["ticker"])
+                r["news_failed"] = news == NEWS_LOOKUP_FAILED
+                r["news"] = None if r["news_failed"] else news
+                r["pillars"]["news"] = r["news"] is not None
+        r["missing"] = [pillar_failure(r, k) for k in PILLARS if r["pillars"][k] is False]
         news_age = ((datetime.now(timezone.utc) - r["news"][2]).total_seconds() / 3600
                     if r["news"] else None)
         r["score"] = rank_score(r["float"], news_age, r["pct"], r["rvol"])
@@ -974,7 +978,7 @@ def scan(universe: List[str], float_cache: dict, schwab: Optional["Schwab"],
     results_5 = [r for r in evaluated if r["moving"] and not r["missing"]]
     results_4 = [r for r in evaluated if r["moving"] and all_but_news(r)]
     results = results_5 if REQUIRE_NEWS else results_4
-    near_misses = [r for r in evaluated if len(r["missing"]) == 1
+    near_misses = [r for r in evaluated if len(r["missing"]) == 1 and None not in r["pillars"].values()
                    and r["pillars"]["price"] and r["pillars"]["change"]]
     runners = [r for r in evaluated if r["runner"] or r["ticker"] in track]
     for r in runners:
@@ -1207,7 +1211,10 @@ class BackgroundScanner:
         import replay  # replay imports this module, so import lazily
 
         session = res["meta"]["session"]
-        tickers = dict.fromkeys([r["ticker"] for r in res["results_4"] + res["runners"]])
+        # Runners whose float (or shares outstanding) is over the limit can never have
+        # qualified, so don't spend a replay on them.
+        could_flag = [r for r in res["runners"] if r.get("float") is None or r["float"] < MAX_FLOAT]
+        tickers = dict.fromkeys([r["ticker"] for r in res["results_4"] + could_flag])
         for t in tickers:
             key = (session, t)
             if all(f.get(key, {}).get("source") == "replay" for f in (self.first_seen, self.first_seen_4)):
